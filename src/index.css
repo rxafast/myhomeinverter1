@@ -48,3 +48,18 @@
   display: none;
 }
 
+@keyframes solarDimPulse {
+  0%, 100% {
+    opacity: 0.35;
+    filter: grayscale(40%);
+  }
+  50% {
+    opacity: 0.55;
+    filter: grayscale(10%);
+  }
+}
+
+.animate-solar-dim {
+  animation: solarDimPulse 3.5s ease-in-out infinite;
+}
+

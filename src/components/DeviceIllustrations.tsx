@@ -2,9 +2,15 @@ import React from 'react';
 import { ParsedTelemetry } from '../types/inverter';
 
 export const SolarPanelIllustration: React.FC<{ active?: boolean }> = ({ active = false }) => (
-  <svg viewBox="0 0 64 64" className="w-11 h-11 shrink-0" aria-hidden="true">
+  <svg
+    viewBox="0 0 64 64"
+    className={`w-11 h-11 shrink-0 transition-all duration-700 ease-in-out ${
+      active ? 'opacity-100 filter-none' : 'opacity-40 saturate-50 animate-solar-dim'
+    }`}
+    aria-hidden="true"
+  >
     {active && (
-      <circle cx="50" cy="14" r="6" className="fill-amber-400" />
+      <circle cx="50" cy="14" r="6" className="fill-amber-400 animate-pulse" />
     )}
     {/* Stand */}
     <path d="M29 44 L35 44 L37 54 L27 54 Z" fill="#94A3B8" />
@@ -172,6 +178,7 @@ export const PowerFlowDiagram: React.FC<{
   telemetry: ParsedTelemetry;
   pvInstalled: number;
 }> = ({ telemetry, pvInstalled }) => {
+  const isSolarZero = telemetry.solarWatts === 0 || telemetry.solarWatts <= 0;
   const solarActive = telemetry.solarWatts > 10;
   const gridImporting = telemetry.gridWatts > 10;
   const gridExporting = telemetry.gridWatts < -10;
@@ -274,22 +281,58 @@ export const PowerFlowDiagram: React.FC<{
         )}
 
         {/* Top-Left Node: Solar PV */}
-        <g transform="translate(14, 14)">
+        <g
+          transform="translate(14, 14)"
+          className={`transition-all duration-700 ease-in-out ${
+            isSolarZero
+              ? 'animate-solar-dim opacity-40 saturate-50'
+              : 'opacity-100 filter-none'
+          }`}
+        >
           <rect
             width="92"
             height="58"
             rx="14"
-            className="fill-slate-100 dark:fill-[#1F2933] stroke-slate-200 dark:stroke-slate-700/80"
+            className={
+              solarActive
+                ? 'fill-emerald-500/10 dark:fill-[#142820] stroke-emerald-500/40 dark:stroke-emerald-500/50'
+                : 'fill-slate-100 dark:fill-[#182029] stroke-slate-300 dark:stroke-slate-700/80'
+            }
             strokeWidth="1.2"
           />
-          <text x="46" y="21" textAnchor="middle" className="fill-emerald-600 dark:fill-emerald-400 text-[10px] font-semibold">
+          <text
+            x="46"
+            y="21"
+            textAnchor="middle"
+            className={
+              solarActive
+                ? 'fill-emerald-600 dark:fill-emerald-400 text-[10px] font-semibold'
+                : 'fill-slate-500 dark:fill-slate-400 text-[10px] font-medium'
+            }
+          >
             Solar PV
           </text>
-          <text x="46" y="38" textAnchor="middle" className="fill-slate-900 dark:fill-white text-[13px] font-bold font-mono">
+          <text
+            x="46"
+            y="38"
+            textAnchor="middle"
+            className={
+              solarActive
+                ? 'fill-slate-900 dark:fill-white text-[13px] font-bold font-mono'
+                : 'fill-slate-400 dark:fill-slate-400 text-[13px] font-bold font-mono'
+            }
+          >
             {telemetry.solarWatts} W
           </text>
-          <text x="46" y="51" textAnchor="middle" className="fill-slate-500 dark:fill-slate-400 text-[9px] font-mono">
-            {telemetry.solarVoltage.toFixed(1)}V · {(pvInstalled / 1000).toFixed(1)}kWp
+          <text
+            x="46"
+            y="51"
+            textAnchor="middle"
+            className="fill-slate-500 dark:fill-slate-400 text-[9px] font-mono"
+          >
+            {solarActive
+              ? `${telemetry.solarVoltage.toFixed(1)}V · ${(pvInstalled / 1000).toFixed(1)}kWp`
+              : '0.0V · No sun'}
           </text>
         </g>
 
