@@ -1,0 +1,6 @@
+{
+  "name": "InverterZone Live Solar Dashboard",
+  "description": "Real-time mobile solar inverter dashboard displaying live solar PV, home load, battery, and grid metrics via the InverterZone Cloud API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
