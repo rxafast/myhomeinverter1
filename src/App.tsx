@@ -447,7 +447,30 @@ export default function App() {
               serverHistory: payload.history ?? [],
             };
           } catch {
-            // Static host (GitHub Pages) or offline fallback
+            // Static host (GitHub Pages) direct cloud fetch attempt
+            try {
+              const directUrl = `https://inverterzone.com/data-api/getRealtimeData?deviceId=${encodeURIComponent(dev.id)}`;
+              const directRes = await fetch(directUrl, { method: 'POST' });
+              if (directRes.ok) {
+                const directJson = (await directRes.json()) as (RawInverterTelemetry & Record<string, unknown>);
+                if (directJson && directJson.solarWatts != null) {
+                  const fetchedAt = Date.now();
+                  const parsed = parseRawTelemetry(directJson, fetchedAt, false, 250, null);
+                  return {
+                    id: dev.id,
+                    dev,
+                    parsed,
+                    raw: directJson,
+                    cloudTodayEnergy: null,
+                    serverHistory: [],
+                  };
+                }
+              }
+            } catch {
+              // Direct fetch blocked by browser CORS or network
+            }
+
+            // Resilient daytime fallback calculation
             const parsed = getFallbackTelemetry(dev);
             return {
               id: dev.id,
