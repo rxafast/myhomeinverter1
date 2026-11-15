@@ -62,6 +62,7 @@ interface DeviceDetailViewProps {
   ) => void;
   onClearFaultLogs: (deviceId: string) => void;
   onUpdateThresholds: (next: AlertThresholds) => void;
+  nearbyBadge?: string;
 }
 
 export const DeviceDetailView: React.FC<DeviceDetailViewProps> = ({
@@ -86,6 +87,7 @@ export const DeviceDetailView: React.FC<DeviceDetailViewProps> = ({
   onUpdateInverterSettings,
   onClearFaultLogs,
   onUpdateThresholds,
+  nearbyBadge,
 }) => {
   const battVoltStr = telemetry ? `${telemetry.batteryVoltage.toFixed(1)}V` : '0.0V';
   const syncAgeText = telemetry ? formatSecondsAgo(telemetry.fetchedAt, nowTimestamp) : 'syncing';
@@ -123,9 +125,16 @@ export const DeviceDetailView: React.FC<DeviceDetailViewProps> = ({
                 <ArrowLeft className="w-5 h-5" />
               </button>
               <div className="min-w-0 pt-1">
-                <h1 className="text-base sm:text-lg font-semibold tracking-tight text-white truncate font-mono tabular-nums">
-                  {device.name} {battVoltStr} {device.ratedWatts}W
-                </h1>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1 className="text-base sm:text-lg font-semibold tracking-tight text-white truncate font-mono tabular-nums">
+                    {device.name} {battVoltStr} {device.ratedWatts}W
+                  </h1>
+                  {nearbyBadge && (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 shrink-0">
+                      {nearbyBadge}
+                    </span>
+                  )}
+                </div>
                 <p className="text-xs sm:text-sm text-slate-300 font-mono tabular-nums mt-0.5 truncate">
                   {telemetry
                     ? `${telemetry.time} (${syncAgeText})`

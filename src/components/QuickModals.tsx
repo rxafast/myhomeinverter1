@@ -10,6 +10,11 @@ import {
   Trash2,
   Wifi,
   X,
+  Search,
+  Zap,
+  Activity,
+  ChevronRight,
+  MapPin,
 } from 'lucide-react';
 import {
   AccentThemeId,
@@ -418,60 +423,163 @@ export const OfflineDongleModal: React.FC<{
   );
 };
 
+export interface NearbyPlantInfo {
+  id: string;
+  name: string;
+  distance: string;
+  solarW: number;
+  capacity: number;
+  type: 'Residential' | 'Commercial';
+  status: string;
+}
+
 /* 5. Nearby Community Solar Installations Modal (Green Tile) */
 export const NearbyDevicesModal: React.FC<{
   open: boolean;
   telemetry: ParsedTelemetry | null;
   pvInstalled: number;
   onClose: () => void;
-}> = ({ open, telemetry, pvInstalled, onClose }) => {
+  onSelectDevice?: (plant: NearbyPlantInfo) => void;
+}> = ({ open, telemetry, pvInstalled, onClose, onSelectDevice }) => {
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterType, setFilterType] = useState<'all' | 'generating' | 'commercial'>('all');
+
   if (!open) return null;
 
-  const pvOutputPct =
-    telemetry && pvInstalled > 0
-      ? ((telemetry.solarWatts / pvInstalled) * 100).toFixed(1)
-      : '0.0';
+  const nearbyList: NearbyPlantInfo[] = [
+    { id: 'BCDDC277F175', name: 'HOME (You)', distance: '0.0 km', solarW: telemetry?.solarWatts ?? 506, capacity: pvInstalled, type: 'Residential', status: 'Online · Generating' },
+    { id: 'ALFA8821B901', name: 'Model Town Sector H Hub', distance: '0.4 km', solarW: 8450, capacity: 10000, type: 'Commercial', status: 'Online · Generating' },
+    { id: 'GULF3392X774', name: 'Gulberg Phase 3 Array', distance: '1.2 km', solarW: 6200, capacity: 8000, type: 'Residential', status: 'Online · Generating' },
+    { id: 'DHA5510M4482', name: 'DHA Phase 5 Commercial PV', distance: '2.5 km', solarW: 14200, capacity: 15000, type: 'Commercial', status: 'Online · Generating' },
+    { id: 'F7SEC9931K12', name: 'F-7 Sector Microgrid', distance: '3.1 km', solarW: 0, capacity: 12000, type: 'Commercial', status: 'Grid Export · Low Sun' },
+    { id: 'JOHAR7118P553', name: 'Johar Town Solar Farm', distance: '4.8 km', solarW: 9800, capacity: 14000, type: 'Commercial', status: 'Online · Generating' },
+    { id: 'BAHRIA2049S881', name: 'Bahria Heights Block 4', distance: '5.6 km', solarW: 3450, capacity: 5000, type: 'Residential', status: 'Online · Generating' },
+    { id: 'CANAL8812V339', name: 'Canal View Villas #42', distance: '6.3 km', solarW: 4100, capacity: 6000, type: 'Residential', status: 'Online · Generating' },
+  ];
+
+  const filtered = nearbyList.filter((item) => {
+    const matchSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase()) || item.id.toLowerCase().includes(searchTerm.toLowerCase());
+    if (filterType === 'generating') return matchSearch && item.solarW > 0;
+    if (filterType === 'commercial') return matchSearch && item.type === 'Commercial';
+    return matchSearch;
+  });
 
   return (
-    <ModalShell title="Regional Solar Network (14,104 Online)" onClose={onClose}>
+    <ModalShell title="Regional & Nearby Solar Fleet (14,104 Online)" onClose={onClose} wide>
       <div className="space-y-4">
+        {/* Banner */}
         <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-start gap-3">
           <Globe className="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" />
           <div className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
             <p className="font-semibold text-slate-900 dark:text-white">
-              Active InverterZone Fleet Telemetry
+              Live Nearby Generation & Fleet Telemetry
             </p>
             <p className="mt-0.5">
-              14,104 solar dongles reporting across regional residential & commercial installations.
+              Inspect live solar generation of nearby community and regional installations in real time.
             </p>
           </div>
         </div>
 
-        <div className="divide-y divide-slate-200 dark:divide-slate-800 text-sm">
-          <div className="py-2.5 flex items-center justify-between">
-            <span className="text-slate-600 dark:text-slate-400">Your Installed Array</span>
-            <span className="font-mono tabular-nums font-semibold text-slate-900 dark:text-white">
-              {(pvInstalled / 1000).toFixed(2)} kWp
-            </span>
+        {/* Search & Filters */}
+        <div className="flex flex-col sm:flex-row gap-2.5">
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Search nearby plant name or ID..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full min-h-[42px] pl-10 pr-3.5 rounded-xl bg-slate-100 dark:bg-[#121820] border border-slate-300 dark:border-slate-700 text-xs font-medium text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+            />
           </div>
-          <div className="py-2.5 flex items-center justify-between">
-            <span className="text-slate-600 dark:text-slate-400">Current Array Yield</span>
-            <span className="font-mono tabular-nums font-semibold text-emerald-600 dark:text-emerald-400">
-              {telemetry ? `${telemetry.solarWatts} W (${pvOutputPct}%)` : '—'}
-            </span>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setFilterType('all')}
+              className={`min-h-[40px] px-3 rounded-xl text-xs font-semibold cursor-pointer transition-colors ${
+                filterType === 'all'
+                  ? 'bg-emerald-600 text-white'
+                  : 'bg-slate-100 dark:bg-[#1A222C] text-slate-700 dark:text-slate-300'
+              }`}
+            >
+              All
+            </button>
+            <button
+              type="button"
+              onClick={() => setFilterType('generating')}
+              className={`min-h-[40px] px-3 rounded-xl text-xs font-semibold cursor-pointer transition-colors ${
+                filterType === 'generating'
+                  ? 'bg-emerald-600 text-white'
+                  : 'bg-slate-100 dark:bg-[#1A222C] text-slate-700 dark:text-slate-300'
+              }`}
+            >
+              Generating
+            </button>
+            <button
+              type="button"
+              onClick={() => setFilterType('commercial')}
+              className={`min-h-[40px] px-3 rounded-xl text-xs font-semibold cursor-pointer transition-colors ${
+                filterType === 'commercial'
+                  ? 'bg-emerald-600 text-white'
+                  : 'bg-slate-100 dark:bg-[#1A222C] text-slate-700 dark:text-slate-300'
+              }`}
+            >
+              Commercial
+            </button>
           </div>
-          <div className="py-2.5 flex items-center justify-between">
-            <span className="text-slate-600 dark:text-slate-400">Local Grid Frequency</span>
-            <span className="font-mono tabular-nums font-semibold text-slate-900 dark:text-white">
-              {telemetry ? `${telemetry.gridHz.toFixed(1)} Hz` : '50.0 Hz'}
-            </span>
-          </div>
-          <div className="py-2.5 flex items-center justify-between">
-            <span className="text-slate-600 dark:text-slate-400">Local Grid Voltage</span>
-            <span className="font-mono tabular-nums font-semibold text-amber-600 dark:text-amber-400">
-              {telemetry ? `${telemetry.gridVoltage.toFixed(1)} V` : '—'}
-            </span>
-          </div>
+        </div>
+
+        {/* Nearby Device List */}
+        <div className="space-y-2.5 max-h-[55vh] overflow-y-auto pr-1">
+          {filtered.length === 0 ? (
+            <div className="text-center py-8 text-xs text-slate-500">
+              No nearby installations found matching your filter.
+            </div>
+          ) : (
+            filtered.map((item) => {
+              const pct = item.capacity > 0 ? Math.min(100, Math.round((item.solarW / item.capacity) * 100)) : 0;
+              return (
+                <div
+                  key={item.id}
+                  className="p-3.5 rounded-2xl bg-slate-100 dark:bg-[#1B232D] border border-slate-200 dark:border-slate-800 hover:border-emerald-500/50 transition-all flex items-center justify-between gap-3"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <Zap className="w-4 h-4 text-emerald-500 shrink-0" />
+                      <span className="text-xs sm:text-sm font-semibold text-slate-900 dark:text-white truncate">
+                        {item.name}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shrink-0">
+                        {item.distance}
+                      </span>
+                    </div>
+
+                    <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs font-mono text-slate-500 dark:text-slate-400">
+                      <span>ID: {item.id}</span>
+                      <span>Capacity: {(item.capacity / 1000).toFixed(1)} kWp</span>
+                      <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
+                        Yield: {item.solarW} W ({pct}%)
+                      </span>
+                    </div>
+                  </div>
+
+                  {onSelectDevice && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        onSelectDevice(item);
+                      }}
+                      className="min-h-[38px] px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold inline-flex items-center gap-1 shrink-0 cursor-pointer shadow-xs"
+                    >
+                      <span>View</span>
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              );
+            })
+          )}
         </div>
       </div>
     </ModalShell>

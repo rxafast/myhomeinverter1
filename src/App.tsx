@@ -72,6 +72,7 @@ import {
   EditDeviceModal,
   NavigationDrawer,
   NearbyDevicesModal,
+  NearbyPlantInfo,
   OfflineDongleModal,
   PalettePickerModal,
   TimersModal,
@@ -164,6 +165,11 @@ export default function App() {
   const [nearbyOpen, setNearbyOpen] = useState(false);
   const [wallboardOpen, setWallboardOpen] = useState(false);
   const [editingDevice, setEditingDevice] = useState<DeviceConfig | null | 'new'>(null);
+  const [previewNearbyDevice, setPreviewNearbyDevice] = useState<{
+    config: DeviceConfig;
+    telemetry: ParsedTelemetry;
+    distance: string;
+  } | null>(null);
 
   /* Device Pairing / Privacy Gate State (Option 4 Security) */
   const [isPaired, setIsPaired] = useState<boolean>(() => {
@@ -630,8 +636,12 @@ export default function App() {
   const primaryTelemetry = telemetryMap[primaryDevice.id] ?? null;
 
   const selectedDevice = useMemo(
-    () => devices.find((d) => d.id === selectedDeviceId) ?? null,
-    [devices, selectedDeviceId]
+    () =>
+      devices.find((d) => d.id === selectedDeviceId) ??
+      (previewNearbyDevice && previewNearbyDevice.config.id === selectedDeviceId
+        ? previewNearbyDevice.config
+        : null),
+    [devices, selectedDeviceId, previewNearbyDevice]
   );
 
   const visibleDevices = useMemo(
@@ -643,8 +653,122 @@ export default function App() {
   const activeTimersCount = useMemo(() => timers.filter((t) => t.enabled).length, [timers]);
 
   const openDeviceDetail = (deviceId: string, tab: DetailTab = 'realtime') => {
+    setPreviewNearbyDevice(null);
     setSelectedDeviceId(deviceId);
     setDetailTab(tab);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const openNearbyDeviceDetail = (plant: NearbyPlantInfo) => {
+    const owned = devices.find((d) => d.id === plant.id);
+    if (owned) {
+      openDeviceDetail(owned.id, 'realtime');
+      return;
+    }
+
+    const now = Date.now();
+    const date = new Date(now);
+    const dateStr = date.toISOString().slice(0, 10).split('-').reverse().join('-');
+    const timeStr = date.toTimeString().slice(0, 8);
+    const solarWatts = Math.max(0, Math.round(plant.solarW));
+    const capacity = Math.max(1000, Math.round(plant.capacity));
+    const panelCount = Math.max(1, Math.round(capacity / 585));
+    const solarVoltage = solarWatts > 0 ? Number((315 + (solarWatts / capacity) * 55).toFixed(1)) : 0;
+    const solarAmpere = solarVoltage > 0 ? Number((solarWatts / solarVoltage).toFixed(1)) : 0;
+    const loadWatts =
+      plant.type === 'Commercial'
+        ? Math.max(1250, Math.round(capacity * 0.28))
+        : Math.max(480, Math.round(capacity * 0.14));
+    const gridWatts = Math.max(-solarWatts, loadWatts - solarWatts);
+    const pv1Watts = Math.round(solarWatts * 0.52);
+    const pv2Watts = Math.max(0, solarWatts - pv1Watts);
+    const pv1Volts = solarVoltage > 0 ? Number((solarVoltage * 0.99).toFixed(1)) : 0;
+    const pv2Volts = solarVoltage > 0 ? Number((solarVoltage * 1.01).toFixed(1)) : 0;
+
+    const config = normalizeDeviceConfig({
+      id: plant.id,
+      name: plant.name,
+      ratedWatts: capacity,
+      favorite: false,
+      solarPanels: {
+        company: 'VSUN',
+        panelWatts: 585,
+        panelCount,
+        pvInstalled: capacity,
+      },
+      inverterSettings: {
+        ...DEFAULT_DEVICE_CONFIG.inverterSettings,
+        inverterModel: plant.type === 'Commercial' ? 'META PV 15000' : 'META PV 10000',
+      },
+    });
+
+    const telemetry: ParsedTelemetry = {
+      deviceId: plant.id,
+      solarWatts,
+      solarVoltage,
+      solarAmpere,
+      loadWatts,
+      loadVa: Math.round(loadWatts * 1.18),
+      loadVoltage: 230.2,
+      loadAmpere: Number((loadWatts / 230.2).toFixed(1)),
+      loadPercentage: Math.min(100, Math.round((loadWatts / capacity) * 100)),
+      gridWatts,
+      gridVoltage: 229.4,
+      gridAmpere: Number((Math.abs(gridWatts) / 229.4).toFixed(1)),
+      gridHz: 50.0,
+      batteryVoltage: 0.0,
+      chargingAmpere: 0.0,
+      dischargingAmpere: 0.0,
+      batteryPercentage: 0,
+      batteryWatts: 0,
+      batteryState: 'no-battery',
+      mode: solarWatts > 0 ? 'SUB' : 'USB',
+      chargingMode: 'SNU',
+      fanSpeed: solarWatts > 3000 ? 52 : 34,
+      time: `${dateStr} ${timeStr}`,
+      mpptTemperature: solarWatts > 3000 ? 47 : 36,
+      powerFactor: 0.85,
+      wifiSignalDbm: -68,
+      mpptSummary: {
+        pv1: {
+          watts: pv1Watts,
+          volts: pv1Volts,
+          amps: pv1Volts > 0 ? Number((pv1Watts / pv1Volts).toFixed(1)) : 0,
+        },
+        pv2: {
+          watts: pv2Watts,
+          volts: pv2Volts,
+          amps: pv2Volts > 0 ? Number((pv2Watts / pv2Volts).toFixed(1)) : 0,
+        },
+        pv3: { watts: 0, volts: 0, amps: 0 },
+        busV: solarWatts > 0 ? 388 : 340,
+        acOutHz: 50.0,
+        panelCompany: 'VSUN',
+        panelWatts: 585,
+        panelCount,
+        pvInstalledW: capacity,
+        peakMpptSnapshot: {
+          time: `${dateStr} 12:30:00`,
+          solarW: Math.max(solarWatts, Math.round(capacity * 0.72)),
+          pv1W: Math.round(Math.max(solarWatts, Math.round(capacity * 0.72)) * 0.52),
+          pv1V: 364.0,
+          pv1A: Number(((Math.max(solarWatts, Math.round(capacity * 0.72)) * 0.52) / 364.0).toFixed(1)),
+          pv2W: Math.round(Math.max(solarWatts, Math.round(capacity * 0.72)) * 0.48),
+          pv2V: 361.0,
+          pv2A: Number(((Math.max(solarWatts, Math.round(capacity * 0.72)) * 0.48) / 361.0).toFixed(1)),
+        },
+      },
+      fetchedAt: now,
+      stale: false,
+    };
+
+    setPreviewNearbyDevice({
+      config,
+      telemetry,
+      distance: plant.distance,
+    });
+    setSelectedDeviceId(plant.id);
+    setDetailTab('realtime');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -771,7 +895,12 @@ export default function App() {
 
   /* Render Device Detail Screen (Screenshot 1, Stats, Stat2, Alerts, & Settings) */
   if (selectedDevice) {
-    const devTelemetry = telemetryMap[selectedDevice.id] ?? null;
+    const isViewingNearby = Boolean(
+      previewNearbyDevice && previewNearbyDevice.config.id === selectedDevice.id
+    );
+    const devTelemetry =
+      telemetryMap[selectedDevice.id] ??
+      (isViewingNearby ? previewNearbyDevice!.telemetry : null);
     const devAlerts = evaluateAlerts(devTelemetry, thresholds, selectedDevice);
 
     return (
@@ -789,7 +918,10 @@ export default function App() {
           isRefreshing={isRefreshing}
           nowTimestamp={nowTimestamp}
           onChangeTab={setDetailTab}
-          onBack={() => setSelectedDeviceId(null)}
+          onBack={() => {
+            setSelectedDeviceId(null);
+            setPreviewNearbyDevice(null);
+          }}
           onRefresh={fetchAllDevices}
           onOpenPalette={() => setPaletteOpen(true)}
           onSaveSolarPanels={handleSaveSolarPanels}
@@ -799,6 +931,9 @@ export default function App() {
           onUpdateInverterSettings={handleUpdateInverterSettings}
           onClearFaultLogs={handleClearFaultLogs}
           onUpdateThresholds={setThresholds}
+          nearbyBadge={
+            isViewingNearby ? `Nearby Fleet · ${previewNearbyDevice!.distance}` : undefined
+          }
         />
 
         <PalettePickerModal
@@ -1396,6 +1531,7 @@ export default function App() {
         telemetry={primaryTelemetry}
         pvInstalled={primaryDevice.solarPanels.pvInstalled}
         onClose={() => setNearbyOpen(false)}
+        onSelectDevice={openNearbyDeviceDetail}
       />
 
       <ViewAllWallboardModal
