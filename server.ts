@@ -2088,6 +2088,176 @@ Respond ONLY with a single raw JSON object (no markdown code fences) matching th
   app.post('/api/realtime', handleRealtime);
   app.get('/api/realtime', handleRealtime);
 
+  /* InverterZone Account Login & Real Nearby Map Fleet Proxy Endpoints */
+  const forwardInverterZonePost = async (url: string, payload: Record<string, unknown>) => {
+    return scheduleUpstreamRequest('high', async () => {
+      const upstream = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+        body: JSON.stringify(payload),
+      });
+      if (!upstream.ok) {
+        throw new Error(`InverterZone returned HTTP ${upstream.status}`);
+      }
+      const rawText = (await upstream.text()).trim();
+      if (!rawText || rawText === 'null') {
+        return null;
+      }
+      try {
+        return JSON.parse(rawText) as unknown;
+      } catch {
+        throw new Error(`Invalid JSON from InverterZone (${rawText.slice(0, 80)})`);
+      }
+    });
+  };
+
+  app.post('/api/iz/login', async (req, res) => {
+    try {
+      const email = String(req.body?.email ?? '').trim();
+      const password = String(req.body?.password ?? '');
+      const deviceId = String(req.body?.deviceId ?? 'web-dashboard-client');
+      const deviceName = String(req.body?.deviceName ?? 'InverterZone Web Dashboard');
+      if (!email || !password) {
+        res.status(400).json({ ok: false, error: 'Email and password are required.' });
+        return;
+      }
+      const data = await forwardInverterZonePost('https://inverterzone.com/api/login', {
+        email,
+        password,
+        deviceId,
+        deviceName,
+      });
+      res.json({ ok: true, data });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Unable to reach InverterZone login API',
+      });
+    }
+  });
+
+  app.post('/api/iz/dashboard', async (req, res) => {
+    try {
+      const token = String(req.body?.token ?? '').trim();
+      if (!token) {
+        res.status(400).json({ ok: false, error: 'Auth token required.' });
+        return;
+      }
+      const data = await forwardInverterZonePost('https://inverterzone.com/api/dashboard', {
+        token,
+      });
+      res.json({ ok: true, data });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to fetch dashboard stats',
+      });
+    }
+  });
+
+  app.post('/api/iz/devices', async (req, res) => {
+    try {
+      const token = String(req.body?.token ?? '').trim();
+      const pageNumber = String(req.body?.pageNumber ?? '1');
+      if (!token) {
+        res.status(400).json({ ok: false, error: 'Auth token required.' });
+        return;
+      }
+      const data = await forwardInverterZonePost('https://inverterzone.com/api/devicesMore', {
+        token,
+        pageNumber,
+      });
+      res.json({ ok: true, data });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to fetch account devices',
+      });
+    }
+  });
+
+  app.post('/api/iz/devices-all', async (req, res) => {
+    try {
+      const token = String(req.body?.token ?? '').trim();
+      if (!token) {
+        res.status(400).json({ ok: false, error: 'Auth token required.' });
+        return;
+      }
+      const data = await forwardInverterZonePost('https://inverterzone.com/api/devices', {
+        token,
+      });
+      res.json({ ok: true, data });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to fetch devices list',
+      });
+    }
+  });
+
+  app.post('/api/iz/nearby', async (req, res) => {
+    try {
+      const token = String(req.body?.token ?? '').trim();
+      const pageNumber = String(req.body?.pageNumber ?? '1');
+      const lat = Number(req.body?.lat);
+      const lng = Number(req.body?.lng);
+      const sort = req.body?.sort === 'production' ? 'production' : 'distance';
+      if (!token) {
+        res.status(400).json({ ok: false, error: 'Auth token required.' });
+        return;
+      }
+      const payload: Record<string, unknown> = {
+        token,
+        pageNumber,
+        sort,
+      };
+      if (Number.isFinite(lat) && Number.isFinite(lng)) {
+        payload.lat = lat;
+        payload.lng = lng;
+      }
+      const data = await forwardInverterZonePost('https://inverterzone.com/api/nearby', payload);
+      res.json({ ok: true, data });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to fetch nearby devices',
+      });
+    }
+  });
+
+  app.post('/api/iz/nearby-search', async (req, res) => {
+    try {
+      const token = String(req.body?.token ?? '').trim();
+      const pageNumber = String(req.body?.pageNumber ?? '1');
+      const lat = Number(req.body?.lat);
+      const lng = Number(req.body?.lng);
+      const search = String(req.body?.search ?? '').trim();
+      if (!token) {
+        res.status(400).json({ ok: false, error: 'Auth token required.' });
+        return;
+      }
+      const payload: Record<string, unknown> = {
+        token,
+        pageNumber,
+        search,
+      };
+      if (Number.isFinite(lat) && Number.isFinite(lng)) {
+        payload.lat = lat;
+        payload.lng = lng;
+      }
+      const data = await forwardInverterZonePost(
+        'https://inverterzone.com/api/getExploreDevicesSearch',
+        payload
+      );
+      res.json({ ok: true, data });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to search nearby devices',
+      });
+    }
+  });
+
   // Background 60-second collector so live dashboard, Multi-MPPT & Today cloud energy stay fresh
   setInterval(async () => {
     const state = readPersistedState();

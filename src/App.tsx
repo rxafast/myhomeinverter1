@@ -24,10 +24,21 @@ import {
   Star,
   Sun,
   Timer,
+  UserCheck,
   Wifi,
   X,
 } from 'lucide-react';
 import { DevicePairingModal } from './components/DevicePairingModal';
+import {
+  fetchInverterZoneAccountDevices,
+  fetchInverterZoneDashboard,
+  fetchLiveRealtimeForMac,
+  InverterZoneAccountSession,
+  InverterZoneDashboardStats,
+  loadAccountSession,
+  loginInverterZoneAccount,
+  saveAccountSession,
+} from './utils/inverterzoneAuth';
 import {
   AccentThemeId,
   AlertThresholds,
@@ -171,15 +182,121 @@ export default function App() {
     distance: string;
   } | null>(null);
 
+  /* InverterZone Account Login & Real Fleet Sync State */
+  const [accountSession, setAccountSession] = useState<InverterZoneAccountSession | null>(() =>
+    loadAccountSession()
+  );
+  const [accountStats, setAccountStats] = useState<InverterZoneDashboardStats | null>(null);
+  const [preferredCenter, setPreferredCenter] = useState<{ lat: number; lon: number } | null>(null);
+  const [pairingModalMode, setPairingModalMode] = useState<'account' | 'device'>('account');
+
   /* Device Pairing / Privacy Gate State (Option 4 Security) */
   const [isPaired, setIsPaired] = useState<boolean>(() => {
     try {
-      return localStorage.getItem(STORAGE_KEYS.pairedStatus) === 'paired';
+      return (
+        localStorage.getItem(STORAGE_KEYS.pairedStatus) === 'paired' ||
+        Boolean(loadAccountSession())
+      );
     } catch {
       return false;
     }
   });
   const [pairingModalOpen, setPairingModalOpen] = useState<boolean>(!isPaired);
+
+  const syncAccountFromCloud = useCallback(
+    async (session: InverterZoneAccountSession) => {
+      const [statsResult, devicesResult] = await Promise.allSettled([
+        fetchInverterZoneDashboard(session.token),
+        fetchInverterZoneAccountDevices(session.token),
+      ]);
+
+      if (statsResult.status === 'fulfilled') {
+        setAccountStats(statsResult.value);
+        if (statsResult.value.userName && statsResult.value.userName !== session.userName) {
+          const updatedSession = { ...session, userName: statsResult.value.userName };
+          setAccountSession(updatedSession);
+          saveAccountSession(updatedSession);
+        }
+      }
+
+      if (devicesResult.status === 'fulfilled' && devicesResult.value.length > 0) {
+        const accountDevs = devicesResult.value;
+        const withCoords = accountDevs.find(
+          (d) => typeof d.latitude === 'number' && typeof d.longitude === 'number'
+        );
+        if (withCoords && withCoords.latitude !== undefined && withCoords.longitude !== undefined) {
+          setPreferredCenter({ lat: withCoords.latitude, lon: withCoords.longitude });
+        }
+
+        setDevices((prev) => {
+          const prevMap = new Map(prev.map((d) => [d.id, d]));
+          const synced: DeviceConfig[] = accountDevs.map((acc) => {
+            const existing = prevMap.get(acc.mac);
+            if (existing) {
+              return {
+                ...existing,
+                name: acc.name || existing.name,
+                ratedWatts: acc.ratedWatts || existing.ratedWatts,
+                favorite: acc.favorite ?? existing.favorite,
+              };
+            }
+            return normalizeDeviceConfig({
+              id: acc.mac,
+              name: acc.name,
+              ratedWatts: acc.ratedWatts,
+              favorite: acc.favorite,
+              firmware: acc.firmware || DEFAULT_DEVICE_CONFIG.firmware,
+              solarPanels: {
+                ...DEFAULT_DEVICE_CONFIG.solarPanels,
+                pvInstalled: acc.pvInstalled,
+              },
+            });
+          });
+          // Preserve any manually added devices not in the account payload
+          for (const existing of prev) {
+            if (!accountDevs.some((a) => a.mac === existing.id)) {
+              synced.push(existing);
+            }
+          }
+          try {
+            localStorage.setItem(STORAGE_KEYS.devices, JSON.stringify(synced));
+          } catch {}
+          return synced;
+        });
+
+        try {
+          localStorage.setItem(STORAGE_KEYS.pairedStatus, 'paired');
+        } catch {}
+        setIsPaired(true);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (accountSession?.token) {
+      void syncAccountFromCloud(accountSession).catch(() => {});
+    }
+  }, [accountSession?.token, syncAccountFromCloud]);
+
+  const handleAccountLogin = async (email: string, password: string) => {
+    const session = await loginInverterZoneAccount(email, password);
+    setAccountSession(session);
+    try {
+      localStorage.setItem(STORAGE_KEYS.pairedStatus, 'paired');
+    } catch {}
+    setIsPaired(true);
+    setPairingModalOpen(false);
+    await syncAccountFromCloud(session).catch(() => {});
+  };
+
+  const handleAccountLogout = () => {
+    saveAccountSession(null);
+    setAccountSession(null);
+    setAccountStats(null);
+    setPreferredCenter(null);
+    setPairingModalOpen(false);
+  };
 
   const handlePairDevice = (deviceId: string, name = 'HOME') => {
     const nextDevice: DeviceConfig = {
@@ -659,6 +776,22 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  const refreshNearbyPreviewDevice = useCallback(async (deviceId: string) => {
+    setIsRefreshing(true);
+    try {
+      const liveRes = await fetchLiveRealtimeForMac(deviceId);
+      if (liveRes) {
+        setPreviewNearbyDevice((prev) =>
+          prev && prev.config.id === deviceId
+            ? { ...prev, telemetry: liveRes.telemetry }
+            : prev
+        );
+      }
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, []);
+
   const openNearbyDeviceDetail = (plant: NearbyPlantInfo) => {
     const owned = devices.find((d) => d.id === plant.id);
     if (owned) {
@@ -670,25 +803,32 @@ export default function App() {
     const date = new Date(now);
     const dateStr = date.toISOString().slice(0, 10).split('-').reverse().join('-');
     const timeStr = date.toTimeString().slice(0, 8);
-    const solarWatts = Math.max(0, Math.round(plant.solarW));
+    const solarWatts = Math.max(0, Math.round(plant.liveTelemetry?.solarWatts ?? plant.solarW));
     const capacity = Math.max(1000, Math.round(plant.capacity));
+    const acRatedWatts = Math.max(1000, Math.round(plant.ratedWatts ?? capacity));
     const panelCount = Math.max(1, Math.round(capacity / 585));
     const solarVoltage = solarWatts > 0 ? Number((315 + (solarWatts / capacity) * 55).toFixed(1)) : 0;
     const solarAmpere = solarVoltage > 0 ? Number((solarWatts / solarVoltage).toFixed(1)) : 0;
     const loadWatts =
-      plant.type === 'Commercial'
+      plant.liveTelemetry?.loadWatts ??
+      plant.loadW ??
+      (plant.type === 'Commercial'
         ? Math.max(1250, Math.round(capacity * 0.28))
-        : Math.max(480, Math.round(capacity * 0.14));
+        : Math.max(480, Math.round(capacity * 0.14)));
     const gridWatts = Math.max(-solarWatts, loadWatts - solarWatts);
     const pv1Watts = Math.round(solarWatts * 0.52);
     const pv2Watts = Math.max(0, solarWatts - pv1Watts);
     const pv1Volts = solarVoltage > 0 ? Number((solarVoltage * 0.99).toFixed(1)) : 0;
     const pv2Volts = solarVoltage > 0 ? Number((solarVoltage * 1.01).toFixed(1)) : 0;
+    const modelDisplay =
+      [plant.brand, plant.model].filter(Boolean).join(' ').trim().toUpperCase() ||
+      (plant.type === 'Commercial' ? 'META PV 15000' : 'META PV 10000');
 
     const config = normalizeDeviceConfig({
       id: plant.id,
       name: plant.name,
-      ratedWatts: capacity,
+      ratedWatts: acRatedWatts,
+      firmware: plant.version || DEFAULT_DEVICE_CONFIG.firmware,
       favorite: false,
       solarPanels: {
         company: 'VSUN',
@@ -698,11 +838,11 @@ export default function App() {
       },
       inverterSettings: {
         ...DEFAULT_DEVICE_CONFIG.inverterSettings,
-        inverterModel: plant.type === 'Commercial' ? 'META PV 15000' : 'META PV 10000',
+        inverterModel: modelDisplay,
       },
     });
 
-    const telemetry: ParsedTelemetry = {
+    const fallbackTelemetry: ParsedTelemetry = {
       deviceId: plant.id,
       solarWatts,
       solarVoltage,
@@ -764,12 +904,16 @@ export default function App() {
 
     setPreviewNearbyDevice({
       config,
-      telemetry,
+      telemetry: plant.liveTelemetry ?? fallbackTelemetry,
       distance: plant.distance,
     });
     setSelectedDeviceId(plant.id);
     setDetailTab('realtime');
     window.scrollTo({ top: 0, behavior: 'smooth' });
+
+    if (accountSession) {
+      void refreshNearbyPreviewDevice(plant.id);
+    }
   };
 
   const handleSaveSolarPanels = (deviceId: string, panels: SolarPanelSettings) => {
@@ -922,7 +1066,13 @@ export default function App() {
             setSelectedDeviceId(null);
             setPreviewNearbyDevice(null);
           }}
-          onRefresh={fetchAllDevices}
+          onRefresh={() => {
+            if (isViewingNearby) {
+              void refreshNearbyPreviewDevice(selectedDevice.id);
+            } else {
+              void fetchAllDevices();
+            }
+          }}
           onOpenPalette={() => setPaletteOpen(true)}
           onSaveSolarPanels={handleSaveSolarPanels}
           onUpdateNotifications={handleUpdateNotifications}
@@ -946,8 +1096,13 @@ export default function App() {
         <DevicePairingModal
           isOpen={pairingModalOpen}
           onPair={handlePairDevice}
+          onAccountLogin={handleAccountLogin}
+          accountSession={accountSession}
+          onAccountLogout={handleAccountLogout}
+          onSyncAccount={accountSession ? () => syncAccountFromCloud(accountSession) : undefined}
           onClose={() => setPairingModalOpen(false)}
           canCancel={isPaired}
+          initialMode={pairingModalMode}
         />
       </>
     );
@@ -1027,14 +1182,29 @@ export default function App() {
           <div className="flex items-center gap-1 shrink-0">
             <button
               type="button"
-              onClick={() => setPairingModalOpen(true)}
-              aria-label="Device Lock & Pairing"
-              title={isPaired ? `Paired device: ${devices[0]?.id || ''}` : 'Pair Inverter Device'}
-              className="min-h-[44px] min-w-[44px] rounded-xl flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors cursor-pointer relative"
+              onClick={() => {
+                setPairingModalMode('account');
+                setPairingModalOpen(true);
+              }}
+              aria-label="InverterZone Account & Device Lock"
+              title={
+                accountSession
+                  ? `Signed in: ${accountSession.email}`
+                  : isPaired
+                    ? `Paired device: ${devices[0]?.id || ''}`
+                    : 'Sign in or Pair Device'
+              }
+              className="min-h-[44px] px-2.5 rounded-xl flex items-center gap-1.5 text-slate-700 dark:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors cursor-pointer"
             >
-              <Lock className={`w-5 h-5 ${isPaired ? 'text-emerald-500' : 'text-amber-500'}`} />
-              {isPaired && (
-                <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-emerald-500" />
+              {accountSession ? (
+                <>
+                  <UserCheck className="w-5 h-5 text-emerald-500" />
+                  <span className="hidden sm:inline text-xs font-medium max-w-[110px] truncate">
+                    {accountSession.userName || accountSession.email.split('@')[0]}
+                  </span>
+                </>
+              ) : (
+                <Lock className={`w-5 h-5 ${isPaired ? 'text-emerald-500' : 'text-amber-500'}`} />
               )}
             </button>
             <button
@@ -1180,6 +1350,7 @@ export default function App() {
                 devicesCount={devices.length}
                 timersCount={activeTimersCount}
                 favoritesCount={favoriteCount}
+                nearbyCount={accountStats?.nearByCount ?? (accountSession ? null : 8)}
                 favoritesOnly={favoritesOnly}
                 onClickDevices={() => {
                   setFavoritesOnly(false);
@@ -1442,6 +1613,7 @@ export default function App() {
               devicesCount={devices.length}
               timersCount={activeTimersCount}
               favoritesCount={favoriteCount}
+              nearbyCount={accountStats?.nearByCount ?? (accountSession ? null : 8)}
               favoritesOnly={favoritesOnly}
               onClickDevices={() => openDeviceDetail(primaryDevice.id, 'realtime')}
               onClickTimers={() => setTimersOpen(true)}
@@ -1530,6 +1702,14 @@ export default function App() {
         open={nearbyOpen}
         telemetry={primaryTelemetry}
         pvInstalled={primaryDevice.solarPanels.pvInstalled}
+        primaryDeviceId={primaryDevice.id}
+        accountSession={accountSession}
+        accountStats={accountStats}
+        preferredCenter={preferredCenter}
+        onOpenAccountLogin={() => {
+          setPairingModalMode('account');
+          setPairingModalOpen(true);
+        }}
         onClose={() => setNearbyOpen(false)}
         onSelectDevice={openNearbyDeviceDetail}
       />
@@ -1553,8 +1733,13 @@ export default function App() {
       <DevicePairingModal
         isOpen={pairingModalOpen}
         onPair={handlePairDevice}
+        onAccountLogin={handleAccountLogin}
+        accountSession={accountSession}
+        onAccountLogout={handleAccountLogout}
+        onSyncAccount={accountSession ? () => syncAccountFromCloud(accountSession) : undefined}
         onClose={() => setPairingModalOpen(false)}
         canCancel={isPaired}
+        initialMode={pairingModalMode}
       />
     </div>
   );
@@ -1564,6 +1749,7 @@ const QuickActionTilesGrid: React.FC<{
   devicesCount: number;
   timersCount: number;
   favoritesCount: number;
+  nearbyCount: number | null;
   favoritesOnly: boolean;
   onClickDevices: () => void;
   onClickTimers: () => void;
@@ -1575,6 +1761,7 @@ const QuickActionTilesGrid: React.FC<{
   devicesCount,
   timersCount,
   favoritesCount,
+  nearbyCount,
   favoritesOnly,
   onClickDevices,
   onClickTimers,
@@ -1637,7 +1824,7 @@ const QuickActionTilesGrid: React.FC<{
       <div className="min-w-0">
         <p className="text-xs sm:text-sm font-medium leading-snug truncate">Nearby Devices</p>
         <p className="text-base sm:text-lg font-semibold font-mono tabular-nums mt-0.5">
-          14104
+          {nearbyCount !== null ? nearbyCount.toLocaleString() : 'Live Map'}
         </p>
       </div>
     </button>
