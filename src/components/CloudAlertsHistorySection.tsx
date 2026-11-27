@@ -10,7 +10,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import {
-  CloudRecordEntry,
+  CloudDateRangeReport,
   fetchAlertsSummaryCloud,
   fetchGroupAlertsCloud,
   fetchNotificationsCountCloud,
@@ -45,7 +45,7 @@ export const CloudAlertsHistorySection: React.FC<CloudAlertsHistorySectionProps>
   // Date-range historical telemetry records (/api/getRecords)
   const [fromDate, setFromDate] = useState<string>(() => getIsoDateOffset(-3));
   const [toDate, setToDate] = useState<string>(() => getIsoDateOffset(0));
-  const [records, setRecords] = useState<CloudRecordEntry[]>([]);
+  const [report, setReport] = useState<CloudDateRangeReport | null>(null);
   const [loadingRecords, setLoadingRecords] = useState(false);
   const [recordsError, setRecordsError] = useState<string | null>(null);
   const [hasLoadedRecords, setHasLoadedRecords] = useState(false);
@@ -139,7 +139,7 @@ export const CloudAlertsHistorySection: React.FC<CloudAlertsHistorySectionProps>
     setHasLoadedRecords(true);
     try {
       const data = await fetchRecordsCloud(accountSession.token, deviceId, fromDate, toDate);
-      setRecords(data);
+      setReport(data);
     } catch (err) {
       setRecordsError(err instanceof Error ? err.message : 'Failed to query cloud records');
     } finally {
@@ -148,19 +148,41 @@ export const CloudAlertsHistorySection: React.FC<CloudAlertsHistorySectionProps>
   };
 
   const handleExportRecordsCsv = () => {
-    if (records.length === 0) return;
-    const header = ['Timestamp', 'Solar_W', 'Load_W', 'Grid_W', 'Grid_V', 'Batt_V', 'Batt_Pct', 'Temp_C', 'Mode'];
-    const lines = records.map((r) =>
+    if (!report || report.entries.length === 0) return;
+    const header = [
+      'Period',
+      'Solar_kWh',
+      'Load_kWh',
+      'Grid_Import_kWh',
+      'Grid_Export_kWh',
+      'Battery_kWh',
+      'Solar_To_Batt_kWh',
+      'Grid_To_Batt_kWh',
+    ];
+    const lines = report.entries.map((r) =>
       [
         r.time,
-        r.solarW ?? '',
-        r.loadW ?? '',
-        r.gridW ?? '',
-        r.gridV ?? '',
-        r.battV ?? '',
-        r.battPct ?? '',
-        r.tempC ?? '',
-        r.mode ?? '',
+        r.solarKwh,
+        r.loadKwh,
+        r.gridKwh,
+        r.exportKwh,
+        r.batteryKwh,
+        r.solarBattKwh,
+        r.gridBattKwh,
+      ]
+        .map((v) => `"${String(v).replace(/"/g, '""')}"`)
+        .join(',')
+    );
+    lines.push(
+      [
+        `Total (${report.summary.time})`,
+        report.summary.solarKwh,
+        report.summary.loadKwh,
+        report.summary.gridKwh,
+        report.summary.exportKwh,
+        report.summary.batteryKwh,
+        report.summary.solarBattKwh,
+        report.summary.gridBattKwh,
       ]
         .map((v) => `"${String(v).replace(/"/g, '""')}"`)
         .join(',')
@@ -336,14 +358,14 @@ export const CloudAlertsHistorySection: React.FC<CloudAlertsHistorySectionProps>
               Query historical inverter snapshots between dates and export to CSV
             </p>
           </div>
-          {records.length > 0 && (
+          {report && report.entries.length > 0 && (
             <button
               type="button"
               onClick={handleExportRecordsCsv}
               className="min-h-[38px] px-3 rounded-xl bg-slate-100 dark:bg-[#1E2732] hover:bg-slate-200 dark:hover:bg-[#263140] text-xs font-semibold text-slate-800 dark:text-slate-200 inline-flex items-center gap-1.5 cursor-pointer"
             >
               <Download className="w-3.5 h-3.5" />
-              <span>Export CSV ({records.length})</span>
+              <span>Export CSV ({report.entries.length})</span>
             </button>
           )}
         </div>
@@ -383,46 +405,73 @@ export const CloudAlertsHistorySection: React.FC<CloudAlertsHistorySectionProps>
 
         {recordsError && <p className="text-xs text-rose-500 font-medium">{recordsError}</p>}
 
-        {hasLoadedRecords && !loadingRecords && records.length === 0 ? (
+        {hasLoadedRecords && !loadingRecords && !recordsError && (!report || report.entries.length === 0) ? (
           <p className="py-5 text-center text-xs text-slate-500 dark:text-slate-400">
-            No archived telemetry points returned for {fromDate} to {toDate}.
+            No archived energy records returned for {fromDate} to {toDate}.
           </p>
-        ) : records.length > 0 ? (
-          <div className="max-h-64 overflow-x-auto overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800">
-            <table className="w-full text-left text-xs font-mono tabular-nums">
-              <thead className="bg-slate-100 dark:bg-[#11171D] text-slate-500 dark:text-slate-400 sticky top-0">
-                <tr>
-                  <th className="px-3 py-2 font-medium">Timestamp</th>
-                  <th className="px-3 py-2 font-medium">Solar</th>
-                  <th className="px-3 py-2 font-medium">Load</th>
-                  <th className="px-3 py-2 font-medium">Grid</th>
-                  <th className="px-3 py-2 font-medium">Batt</th>
-                  <th className="px-3 py-2 font-medium">Mode</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-slate-800 dark:text-slate-200">
-                {records.slice(0, 60).map((row, idx) => (
-                  <tr key={idx}>
-                    <td className="px-3 py-2 whitespace-nowrap">{row.time || '—'}</td>
-                    <td className="px-3 py-2 text-emerald-600 dark:text-emerald-400">
-                      {row.solarW !== undefined ? `${row.solarW}W` : '—'}
-                    </td>
-                    <td className="px-3 py-2 text-rose-600 dark:text-rose-400">
-                      {row.loadW !== undefined ? `${row.loadW}W` : '—'}
-                    </td>
-                    <td className="px-3 py-2">
-                      {row.gridW !== undefined ? `${row.gridW}W` : '—'}
-                      {row.gridV !== undefined ? ` · ${row.gridV}V` : ''}
-                    </td>
-                    <td className="px-3 py-2">
-                      {row.battV !== undefined ? `${row.battV}V` : '—'}
-                      {row.battPct !== undefined ? ` (${row.battPct}%)` : ''}
-                    </td>
-                    <td className="px-3 py-2">{row.mode || '—'}</td>
+        ) : report && report.entries.length > 0 ? (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
+              <div className="rounded-xl bg-slate-100/80 dark:bg-[#11171D] p-3">
+                <p className="text-slate-500 dark:text-slate-400">Solar Yield</p>
+                <p className="mt-0.5 text-sm font-semibold font-mono tabular-nums text-emerald-600 dark:text-emerald-400">
+                  {report.summary.solarKwh.toFixed(1)} kWh
+                </p>
+              </div>
+              <div className="rounded-xl bg-slate-100/80 dark:bg-[#11171D] p-3">
+                <p className="text-slate-500 dark:text-slate-400">Home Load</p>
+                <p className="mt-0.5 text-sm font-semibold font-mono tabular-nums text-rose-600 dark:text-rose-400">
+                  {report.summary.loadKwh.toFixed(1)} kWh
+                </p>
+              </div>
+              <div className="rounded-xl bg-slate-100/80 dark:bg-[#11171D] p-3">
+                <p className="text-slate-500 dark:text-slate-400">Grid Import</p>
+                <p className="mt-0.5 text-sm font-semibold font-mono tabular-nums text-amber-600 dark:text-amber-400">
+                  {report.summary.gridKwh.toFixed(1)} kWh
+                </p>
+              </div>
+              <div className="rounded-xl bg-slate-100/80 dark:bg-[#11171D] p-3">
+                <p className="text-slate-500 dark:text-slate-400">
+                  {report.estimatedSavingsRs > 0 ? 'Solar Savings' : 'Grid Export'}
+                </p>
+                <p className="mt-0.5 text-sm font-semibold font-mono tabular-nums text-sky-600 dark:text-sky-400">
+                  {report.estimatedSavingsRs > 0
+                    ? `Rs ${report.estimatedSavingsRs.toLocaleString()}`
+                    : `${report.summary.exportKwh.toFixed(1)} kWh`}
+                </p>
+              </div>
+            </div>
+
+            <div className="max-h-64 overflow-x-auto overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800">
+              <table className="w-full text-left text-xs font-mono tabular-nums">
+                <thead className="bg-slate-100 dark:bg-[#11171D] text-slate-500 dark:text-slate-400 sticky top-0">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">Period</th>
+                    <th className="px-3 py-2 font-medium">Solar</th>
+                    <th className="px-3 py-2 font-medium">Load</th>
+                    <th className="px-3 py-2 font-medium">Grid</th>
+                    <th className="px-3 py-2 font-medium">Export</th>
+                    <th className="px-3 py-2 font-medium">Battery</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-slate-800 dark:text-slate-200">
+                  {report.entries.slice(0, 90).map((row, idx) => (
+                    <tr key={idx}>
+                      <td className="px-3 py-2 whitespace-nowrap">{row.time || '—'}</td>
+                      <td className="px-3 py-2 text-emerald-600 dark:text-emerald-400">
+                        {row.solarKwh.toFixed(1)} kWh
+                      </td>
+                      <td className="px-3 py-2 text-rose-600 dark:text-rose-400">
+                        {row.loadKwh.toFixed(1)} kWh
+                      </td>
+                      <td className="px-3 py-2">{row.gridKwh.toFixed(1)} kWh</td>
+                      <td className="px-3 py-2">{row.exportKwh.toFixed(1)} kWh</td>
+                      <td className="px-3 py-2">{row.batteryKwh.toFixed(1)} kWh</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         ) : null}
       </section>

@@ -379,15 +379,74 @@ export async function callSmartTimer<T = unknown>(
 /* ================= 4. ALERTS, RECORDS & NOTIFICATIONS ================= */
 export interface CloudRecordEntry {
   time: string;
-  solarW?: number;
-  loadW?: number;
-  gridW?: number;
-  gridV?: number;
-  battV?: number;
-  battPct?: number;
-  tempC?: number;
-  mode?: string;
+  solarKwh: number;
+  loadKwh: number;
+  gridKwh: number;
+  exportKwh: number;
+  batteryKwh: number;
+  solarBattKwh: number;
+  gridBattKwh: number;
   raw: Record<string, unknown>;
+}
+
+export interface CloudDateRangeReport {
+  fromIso: string;
+  toIso: string;
+  rateRs: number;
+  summary: CloudRecordEntry;
+  estimatedSavingsRs: number;
+  entries: CloudRecordEntry[];
+}
+
+function formatInverterZoneUtcDate(dateStr: string, endOfDay: boolean): string {
+  const clean = dateStr.trim();
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(clean)) {
+    return clean.endsWith('Z') ? `${clean.slice(0, 19)}+00:00` : clean;
+  }
+  const m = clean.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) {
+    throw new Error('Please choose a valid YYYY-MM-DD date.');
+  }
+  const y = Number(m[1]);
+  const mo = Number(m[2]) - 1;
+  const d = Number(m[3]);
+  const dt = endOfDay
+    ? new Date(y, mo, d, 23, 59, 0)
+    : new Date(y, mo, d, 0, 0, 0);
+  if (Number.isNaN(dt.getTime())) {
+    throw new Error('Invalid date selection.');
+  }
+  return `${dt.toISOString().slice(0, 19)}+00:00`;
+}
+
+function parseEnergyBucket(label: string, r: Record<string, unknown>): CloudRecordEntry {
+  const solarKwh = Number(r.todaySolar ?? r.solar ?? 0) || 0;
+  const gridKwh = Number(r.todayGrid ?? r.grid ?? 0) || 0;
+  const exportKwh = Number(r.todayNetGrid ?? r.netGrid ?? 0) || 0;
+  const batteryKwh = Number(r.todayBattery ?? r.battery ?? 0) || 0;
+  const solarBattKwh = Number(r.todaySolarBattery ?? r.solarBattery ?? 0) || 0;
+  const gridBattKwh = Number(r.todayGridBattery ?? r.gridBattery ?? 0) || 0;
+  const rawLoad = r.todayLoad ?? r.load;
+  const computedLoad = Math.max(
+    0,
+    solarKwh + gridKwh + batteryKwh - solarBattKwh - gridBattKwh - exportKwh
+  );
+  const loadKwh =
+    rawLoad !== undefined && rawLoad !== null && Number.isFinite(Number(rawLoad))
+      ? Number(rawLoad)
+      : Number(computedLoad.toFixed(1));
+
+  return {
+    time: label,
+    solarKwh: Number(solarKwh.toFixed(1)),
+    loadKwh: Number(loadKwh.toFixed(1)),
+    gridKwh: Number(gridKwh.toFixed(1)),
+    exportKwh: Number(exportKwh.toFixed(1)),
+    batteryKwh: Number(batteryKwh.toFixed(1)),
+    solarBattKwh: Number(solarBattKwh.toFixed(1)),
+    gridBattKwh: Number(gridBattKwh.toFixed(1)),
+    raw: r,
+  };
 }
 
 export async function fetchAlertsSummaryCloud(token: string, deviceId: string) {
@@ -420,42 +479,82 @@ export async function fetchRecordsCloud(
   deviceId: string,
   fromDate: string,
   toDate: string
-): Promise<CloudRecordEntry[]> {
+): Promise<CloudDateRangeReport> {
+  if (fromDate > toDate) {
+    throw new Error('To Date must be on or after From Date.');
+  }
+  const fromIso = formatInverterZoneUtcDate(fromDate, false);
+  const toIso = formatInverterZoneUtcDate(toDate, true);
+
   const raw = await readCloudEndpoint<unknown>(
     'getRecords',
     {
       deviceId: deviceId.trim().toUpperCase(),
-      fromDate,
-      toDate,
+      fromDate: fromIso,
+      toDate: toIso,
     },
     token
   );
-  const rows = Array.isArray(raw)
-    ? raw
-    : raw && typeof raw === 'object' && Array.isArray((raw as { data?: unknown[] }).data)
-      ? (raw as { data: unknown[] }).data
+
+  if (Array.isArray(raw)) {
+    const entries = raw
+      .filter((r): r is Record<string, unknown> => Boolean(r && typeof r === 'object'))
+      .map((r) => parseEnergyBucket(String(r.time ?? r.date ?? ''), r));
+    const totalSolar = entries.reduce((acc, e) => acc + e.solarKwh, 0);
+    const totalLoad = entries.reduce((acc, e) => acc + e.loadKwh, 0);
+    const totalGrid = entries.reduce((acc, e) => acc + e.gridKwh, 0);
+    const totalExport = entries.reduce((acc, e) => acc + e.exportKwh, 0);
+    const totalBatt = entries.reduce((acc, e) => acc + e.batteryKwh, 0);
+    const summary: CloudRecordEntry = {
+      time: `${fromDate} – ${toDate}`,
+      solarKwh: Number(totalSolar.toFixed(1)),
+      loadKwh: Number(totalLoad.toFixed(1)),
+      gridKwh: Number(totalGrid.toFixed(1)),
+      exportKwh: Number(totalExport.toFixed(1)),
+      batteryKwh: Number(totalBatt.toFixed(1)),
+      solarBattKwh: 0,
+      gridBattKwh: 0,
+      raw: {},
+    };
+    return {
+      fromIso,
+      toIso,
+      rateRs: 0,
+      summary,
+      estimatedSavingsRs: 0,
+      entries,
+    };
+  }
+
+  const obj = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const rateRs = Number(obj.rate ?? 0) || 0;
+  const summary = parseEnergyBucket(`${fromDate} – ${toDate}`, obj);
+  const chartArr = Array.isArray(obj.monthChart)
+    ? obj.monthChart
+    : Array.isArray(obj.data)
+      ? obj.data
       : [];
 
-  return rows
+  const parsedEntries = chartArr
     .filter((r): r is Record<string, unknown> => Boolean(r && typeof r === 'object'))
-    .map((r) => ({
-      time: String(r.time ?? r.createdAt ?? r.date ?? ''),
-      solarW: r.solarW != null || r.solarWatts != null ? Number(r.solarW ?? r.solarWatts) : undefined,
-      loadW: r.acOutW != null || r.loadWatts != null ? Number(r.acOutW ?? r.loadWatts) : undefined,
-      gridW: r.gridW != null || r.gridWatts != null ? Number(r.gridW ?? r.gridWatts) : undefined,
-      gridV: r.gridV != null || r.gridVoltage != null ? Number(r.gridV ?? r.gridVoltage) : undefined,
-      battV: r.battV != null || r.batteryVoltage != null ? Number(r.battV ?? r.batteryVoltage) : undefined,
-      battPct:
-        r.battPercent != null || r.batteryPercentage != null
-          ? Number(r.battPercent ?? r.batteryPercentage)
-          : undefined,
-      tempC:
-        r.heatSinkDegC != null || r.mpptTemperature != null
-          ? Number(r.heatSinkDegC ?? r.mpptTemperature)
-          : undefined,
-      mode: typeof r.mode === 'string' ? r.mode : typeof r.outputSource === 'string' ? r.outputSource : undefined,
-      raw: r,
-    }));
+    .map((r) => parseEnergyBucket(String(r.time ?? r.date ?? r.createdAt ?? ''), r))
+    .sort((a, b) => a.time.localeCompare(b.time));
+
+  const entries =
+    parsedEntries.length > 0
+      ? parsedEntries
+      : Object.keys(obj).length > 0
+        ? [summary]
+        : [];
+
+  return {
+    fromIso,
+    toIso,
+    rateRs,
+    summary,
+    estimatedSavingsRs: Math.round(summary.solarKwh * rateRs),
+    entries,
+  };
 }
 
 export async function fetchNotificationsCountCloud(
