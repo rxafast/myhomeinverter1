@@ -53,16 +53,22 @@ import {
   generateHomeAssistantYaml,
   playAlertBeep,
 } from '../utils/telemetry';
+import { InverterZoneAccountSession } from '../utils/inverterzoneAuth';
+import { sendInverterCommand, syncInverterFieldToCloud } from '../utils/inverterzoneApi';
 
 interface SettingsTabPanelProps {
   device: DeviceConfig;
   telemetry: ParsedTelemetry | null;
   rawPayload: Record<string, unknown> | null;
+  accountSession?: InverterZoneAccountSession | null;
   onUpdateNotifications: (next: NotificationSettingsConfig) => void;
   onUpdateDailySummary: (next: DailySummaryConfig) => void;
   onSendDailySummaryTest: () => void;
   onUpdateInverterSettings: (next: InverterSettingsConfig, summaryLabel?: string) => void;
   onSaveSolarPanels: (panels: SolarPanelSettings) => void;
+  onRenameDevice?: (nextName: string) => void;
+  onOpenAccountLogin?: () => void;
+  onOpenCloudHub?: () => void;
 }
 
 const INVERTER_COMPANIES = [
@@ -94,13 +100,20 @@ export const SettingsTabPanel: React.FC<SettingsTabPanelProps> = ({
   device,
   telemetry,
   rawPayload,
+  accountSession = null,
   onUpdateNotifications,
   onUpdateDailySummary,
   onSendDailySummaryTest,
   onUpdateInverterSettings,
   onSaveSolarPanels,
+  onRenameDevice,
+  onOpenAccountLogin,
+  onOpenCloudHub,
 }) => {
   /* Local controlled inputs for fields with explicit Save / Change actions */
+  const [deviceNameInput, setDeviceNameInput] = useState(device.name);
+  const [confirmResetStep, setConfirmResetStep] = useState(false);
+  const [otaBusy, setOtaBusy] = useState(false);
   const [modelInput, setModelInput] = useState(device.inverterSettings.inverterModel);
   const [rateInput, setRateInput] = useState(
     device.inverterSettings.electricityRateRs > 0
@@ -138,6 +151,7 @@ export const SettingsTabPanel: React.FC<SettingsTabPanelProps> = ({
   }>({ status: 'idle', message: '' });
 
   useEffect(() => {
+    setDeviceNameInput(device.name);
     setModelInput(device.inverterSettings.inverterModel);
     setRateInput(
       device.inverterSettings.electricityRateRs > 0
@@ -240,27 +254,57 @@ export const SettingsTabPanel: React.FC<SettingsTabPanelProps> = ({
     flashSaved(checked ? 'Notifications enabled' : 'Notifications muted');
   };
 
-  const handleSaveModel = () => {
+  const handleSaveModel = async () => {
     const trimmed = modelInput.trim() || 'MATRIX PV 10000';
     setModelInput(trimmed);
     onUpdateInverterSettings(
       { ...device.inverterSettings, inverterModel: trimmed },
       'Inverter model saved'
     );
-    flashSaved('Inverter model saved');
+    if (accountSession?.token) {
+      try {
+        const res = await syncInverterFieldToCloud(
+          accountSession.token,
+          device.id,
+          'inverterModel',
+          trimmed
+        );
+        flashSaved(res?.msg || 'Inverter model pushed to cloud');
+        return;
+      } catch (err) {
+        flashSaved(err instanceof Error ? err.message : 'Saved locally (cloud offline)');
+        return;
+      }
+    }
+    flashSaved('Inverter model saved locally');
   };
 
-  const handleSaveRate = () => {
+  const handleSaveRate = async () => {
     const parsed = Math.max(0, parseFloat(rateInput) || 0);
     setRateInput(parsed > 0 ? String(parsed) : '');
     onUpdateInverterSettings(
       { ...device.inverterSettings, electricityRateRs: parsed },
       'Electricity rate saved'
     );
+    if (accountSession?.token) {
+      try {
+        const res = await syncInverterFieldToCloud(
+          accountSession.token,
+          device.id,
+          'electricityRateRs',
+          parsed
+        );
+        flashSaved(res?.msg || `Cloud rate set to Rs ${parsed}/kWh`);
+        return;
+      } catch (err) {
+        flashSaved(err instanceof Error ? err.message : 'Saved locally');
+        return;
+      }
+    }
     flashSaved(parsed > 0 ? `Electricity rate set to Rs ${parsed}/kWh` : 'Electricity rate cleared');
   };
 
-  const handleInverterField = <K extends keyof InverterSettingsConfig>(
+  const handleInverterField = async <K extends keyof InverterSettingsConfig>(
     key: K,
     value: InverterSettingsConfig[K],
     label: string
@@ -269,7 +313,94 @@ export const SettingsTabPanel: React.FC<SettingsTabPanelProps> = ({
       playAlertBeep();
     }
     onUpdateInverterSettings({ ...device.inverterSettings, [key]: value }, label);
-    flashSaved(`${label} updated`);
+    if (accountSession?.token) {
+      try {
+        const res = await syncInverterFieldToCloud(accountSession.token, device.id, key, value);
+        flashSaved(res ? `${label}: ${res.msg}` : `${label} updated`);
+        return;
+      } catch (err) {
+        flashSaved(
+          err instanceof Error ? `${label} saved locally (${err.message})` : `${label} saved locally`
+        );
+        return;
+      }
+    }
+    flashSaved(`${label} updated locally`);
+  };
+
+  const handleRenameCloudDevice = async () => {
+    const clean = deviceNameInput.trim();
+    if (!clean) return;
+    if (onRenameDevice) onRenameDevice(clean);
+    if (accountSession?.token) {
+      try {
+        const res = await sendInverterCommand(accountSession.token, 'chnageDeviceName', {
+          deviceId: device.id,
+          name: clean,
+        });
+        flashSaved(res.msg || `Renamed to ${clean}`);
+        return;
+      } catch (err) {
+        flashSaved(err instanceof Error ? err.message : 'Renamed locally');
+        return;
+      }
+    }
+    flashSaved(`Renamed to ${clean}`);
+  };
+
+  const handleOtaCheckPush = async () => {
+    if (!accountSession?.token) return;
+    setOtaBusy(true);
+    try {
+      const res = await sendInverterCommand(accountSession.token, 'sendOTAUpdate', {
+        deviceId: device.id,
+      });
+      flashSaved(res.msg || 'OTA firmware check dispatched');
+    } catch (err) {
+      flashSaved(err instanceof Error ? err.message : 'OTA request failed');
+    } finally {
+      setOtaBusy(false);
+    }
+  };
+
+  const handlePushGpsLocation = () => {
+    if (!accountSession?.token || typeof navigator === 'undefined' || !navigator.geolocation) {
+      flashSaved('Browser GPS unavailable');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const res = await sendInverterCommand(accountSession.token, 'sendLocation', {
+            deviceId: device.id,
+            latitude: String(pos.coords.latitude),
+            longitude: String(pos.coords.longitude),
+          });
+          flashSaved(res.msg || 'Device coordinates updated in cloud');
+        } catch (err) {
+          flashSaved(err instanceof Error ? err.message : 'Location update failed');
+        }
+      },
+      () => flashSaved('GPS permission denied')
+    );
+  };
+
+  const handleRemoteReset = async () => {
+    if (!accountSession?.token) return;
+    if (!confirmResetStep) {
+      setConfirmResetStep(true);
+      setTimeout(() => setConfirmResetStep(false), 5000);
+      return;
+    }
+    setConfirmResetStep(false);
+    try {
+      const res = await sendInverterCommand(accountSession.token, 'resetDevice', {
+        deviceId: device.id,
+      });
+      flashSaved(res.msg || 'Reset command sent to inverter');
+    } catch (err) {
+      flashSaved(err instanceof Error ? err.message : 'Reset command failed');
+    }
   };
 
   const handleWattsChange = (val: string) => {
@@ -290,7 +421,7 @@ export const SettingsTabPanel: React.FC<SettingsTabPanelProps> = ({
     }
   };
 
-  const handleSavePanelsForm = (e: React.FormEvent) => {
+  const handleSavePanelsForm = async (e: React.FormEvent) => {
     e.preventDefault();
     const w = Math.max(0, parseInt(panelWatts, 10) || 0);
     const n = Math.max(0, parseInt(panelCount, 10) || 0);
@@ -301,7 +432,22 @@ export const SettingsTabPanel: React.FC<SettingsTabPanelProps> = ({
       panelCount: n,
       pvInstalled: total,
     });
-    flashSaved('Solar panel details saved');
+    if (accountSession?.token) {
+      try {
+        const res = await sendInverterCommand(accountSession.token, 'savePanelInfo', {
+          deviceId: device.id,
+          panelCompany: company || 'VSUN',
+          panelWatts: String(w),
+          panelCount: String(n),
+        });
+        flashSaved(res.msg || 'Panel details synced to InverterZone cloud');
+        return;
+      } catch (err) {
+        flashSaved(err instanceof Error ? err.message : 'Solar panel details saved locally');
+        return;
+      }
+    }
+    flashSaved('Solar panel details saved locally');
   };
 
   const inv = device.inverterSettings;
@@ -382,6 +528,78 @@ export const SettingsTabPanel: React.FC<SettingsTabPanelProps> = ({
                 </button>
               </div>
             </div>
+          </div>
+
+          {/* Cloud Rename, OTA, GPS & Sharing Actions */}
+          <div className="pt-4 border-t border-slate-200 dark:border-slate-800/80 space-y-3">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                aria-label="Cloud Device Name"
+                value={deviceNameInput}
+                onChange={(e) => setDeviceNameInput(e.target.value)}
+                placeholder="Site name (e.g. HOME)"
+                className="flex-1 min-h-[42px] px-3 rounded-lg bg-slate-50 dark:bg-[#171C23] border border-slate-300 dark:border-slate-600 text-sm text-slate-900 dark:text-white"
+              />
+              <button
+                type="button"
+                onClick={() => void handleRenameCloudDevice()}
+                className="min-h-[42px] px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer shrink-0"
+              >
+                Rename
+              </button>
+            </div>
+
+            {accountSession ? (
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleOtaCheckPush()}
+                  disabled={otaBusy}
+                  className="min-h-[40px] px-3.5 rounded-lg bg-slate-100 dark:bg-[#1B232D] hover:bg-slate-200 dark:hover:bg-[#242F3C] text-xs font-semibold text-slate-800 dark:text-slate-200 inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${otaBusy ? 'animate-spin' : ''}`} />
+                  <span>{otaBusy ? 'Pushing OTA...' : 'Push Dongle OTA'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePushGpsLocation}
+                  className="min-h-[40px] px-3.5 rounded-lg bg-slate-100 dark:bg-[#1B232D] hover:bg-slate-200 dark:hover:bg-[#242F3C] text-xs font-semibold text-slate-800 dark:text-slate-200 cursor-pointer"
+                >
+                  Sync GPS Pin
+                </button>
+                {onOpenCloudHub && (
+                  <button
+                    type="button"
+                    onClick={onOpenCloudHub}
+                    className="min-h-[40px] px-3.5 rounded-lg bg-slate-100 dark:bg-[#1B232D] hover:bg-slate-200 dark:hover:bg-[#242F3C] text-xs font-semibold text-emerald-600 dark:text-emerald-400 cursor-pointer"
+                  >
+                    Sharing · BMS · Dual-PV
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => void handleRemoteReset()}
+                  className={`min-h-[40px] px-3.5 rounded-lg text-xs font-semibold cursor-pointer transition-colors ${
+                    confirmResetStep
+                      ? 'bg-rose-600 text-white'
+                      : 'bg-slate-100 dark:bg-[#1B232D] text-rose-600 dark:text-rose-400 hover:bg-rose-500/10'
+                  }`}
+                >
+                  {confirmResetStep ? 'Tap Again to Confirm Reset' : 'Reset Inverter'}
+                </button>
+              </div>
+            ) : (
+              onOpenAccountLogin && (
+                <button
+                  type="button"
+                  onClick={onOpenAccountLogin}
+                  className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline cursor-pointer"
+                >
+                  Sign in with your InverterZone account to enable live remote inverter control, OTA &amp; sharing →
+                </button>
+              )
+            )}
           </div>
         </div>
       </section>
@@ -571,12 +789,18 @@ export const SettingsTabPanel: React.FC<SettingsTabPanelProps> = ({
 
       {/* 4. INVERTER SETTINGS CARD (All 19 Parameters from Screenshot) */}
       <section className="rounded-2xl bg-white dark:bg-[#12161B] border border-slate-200 dark:border-slate-800/80 p-5 sm:p-6 shadow-xs">
-        <h2 className="text-lg font-semibold text-slate-900 dark:text-white">
-          Inverter Settings
-        </h2>
-        <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1 mb-6">
-          Adjust your inverter settings
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-6">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900 dark:text-white">
+              Inverter Settings
+            </h2>
+            <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1">
+              {accountSession
+                ? 'Live cloud remote control active — changes dispatch directly to inverter hardware'
+                : 'Local preview mode — sign in to push live settings to your inverter'}
+            </p>
+          </div>
+        </div>
 
         <div className="space-y-5">
           {/* 1. Output Capacity */}

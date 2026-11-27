@@ -22,10 +22,14 @@ import {
 } from '../types/inverter';
 import { getApiUrl } from '../utils/apiConfig';
 import { getFallbackStat2Bundle } from '../utils/fallbackData';
+import { BatteryRunwayCard } from './BatteryRunwayCard';
+import { InverterZoneAccountSession } from '../utils/inverterzoneAuth';
+import { sendInverterCommand } from '../utils/inverterzoneApi';
 
 interface Stat2TabPanelProps {
   device: DeviceConfig;
   telemetry: ParsedTelemetry | null;
+  accountSession?: InverterZoneAccountSession | null;
 }
 
 type SeriesKey =
@@ -135,7 +139,11 @@ function loadBillCycleDay(): number {
   }
 }
 
-export const Stat2TabPanel: React.FC<Stat2TabPanelProps> = ({ device, telemetry }) => {
+export const Stat2TabPanel: React.FC<Stat2TabPanelProps> = ({
+  device,
+  telemetry,
+  accountSession = null,
+}) => {
   const [period, setPeriod] = useState<CloudEnergyPeriod>('T');
   const [chartHours, setChartHours] = useState<1 | 2 | 4 | 6>(1);
   const [bundle, setBundle] = useState<CloudStat2Bundle | null>(null);
@@ -253,6 +261,12 @@ export const Stat2TabPanel: React.FC<Stat2TabPanelProps> = ({ device, telemetry 
     try {
       localStorage.setItem(BILL_LIMIT_STORAGE_KEY, String(val));
     } catch {}
+    if (accountSession?.token) {
+      void sendInverterCommand(accountSession.token, 'setUnitLimit', {
+        deviceId: device.id,
+        value: String(val),
+      }).catch(() => {});
+    }
     setLimitModalOpen(false);
   };
 
@@ -262,6 +276,12 @@ export const Stat2TabPanel: React.FC<Stat2TabPanelProps> = ({ device, telemetry 
     try {
       localStorage.setItem(BILL_DATE_STORAGE_KEY, String(d));
     } catch {}
+    if (accountSession?.token) {
+      void sendInverterCommand(accountSession.token, 'setBillDay', {
+        deviceId: device.id,
+        value: String(d),
+      }).catch(() => {});
+    }
     setBillDateModalOpen(false);
   };
 
@@ -1110,7 +1130,14 @@ export const Stat2TabPanel: React.FC<Stat2TabPanelProps> = ({ device, telemetry 
         </div>
       </section>
 
-      {/* 6. "PANELS" LEARNING CARD */}
+      {/* 6. LIVE CLOUD BATTERY RUNWAY & OUTAGE PREDICTOR */}
+      <BatteryRunwayCard
+        deviceId={device.id}
+        telemetry={telemetry}
+        accountSession={accountSession}
+      />
+
+      {/* 7. "PANELS" LEARNING CARD */}
       <section className="mb-4 rounded-3xl bg-[#111720] border border-slate-800/80 p-5 shadow-sm">
         <h3 className="text-base font-semibold text-white mb-3">Panels</h3>
 

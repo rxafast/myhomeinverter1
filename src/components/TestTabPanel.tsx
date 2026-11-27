@@ -18,13 +18,18 @@ import {
 import { DeviceConfig, DongleExtendedDiagnostics } from '../types/inverter';
 import { AiCloudSuitePanel } from './AiCloudSuitePanel';
 import { getApiUrl } from '../utils/apiConfig';
+import { InverterZoneAccountSession } from '../utils/inverterzoneAuth';
+import { sendInverterCommand } from '../utils/inverterzoneApi';
 
 interface TestTabPanelProps {
   device: DeviceConfig;
+  accountSession?: InverterZoneAccountSession | null;
   onSyncHardwareSettingsToProfile?: (diag: DongleExtendedDiagnostics) => void;
 }
 
 interface LabWorkbenchConfig {
+  battType: string;
+  chargeSource: string;
   eqEnabled: boolean;
   eqVoltage: string;
   eqTimeMin: string;
@@ -32,8 +37,13 @@ interface LabWorkbenchConfig {
   dualOutputEnabled: boolean;
   dualOutputCutOffV: string;
   gridFeedEnabled: boolean;
+  gridFeedWatts: string;
   maxAcChargeA: string;
   maxTotalChargeA: string;
+  battBulkV: string;
+  battFloatV: string;
+  battCutOffV: string;
+  battBackGridV: string;
 }
 
 const LAB_STORAGE_PREFIX = 'iz_dongle_lab_v1_';
@@ -201,6 +211,7 @@ rest:
 
 export const TestTabPanel: React.FC<TestTabPanelProps> = ({
   device,
+  accountSession = null,
   onSyncHardwareSettingsToProfile,
 }) => {
   const [diag, setDiag] = useState<DongleExtendedDiagnostics | null>(null);
@@ -227,9 +238,31 @@ export const TestTabPanel: React.FC<TestTabPanelProps> = ({
   const [labConfig, setLabConfig] = useState<LabWorkbenchConfig>(() => {
     try {
       const raw = localStorage.getItem(`${LAB_STORAGE_PREFIX}${device.id}`);
-      if (raw) return JSON.parse(raw) as LabWorkbenchConfig;
+      if (raw) {
+        return {
+          battType: 'USE',
+          chargeSource: 'SNU',
+          eqEnabled: false,
+          eqVoltage: '14.6',
+          eqTimeMin: '60',
+          eqIntervalDays: '30',
+          dualOutputEnabled: false,
+          dualOutputCutOffV: '44.0',
+          gridFeedEnabled: false,
+          gridFeedWatts: '0',
+          maxAcChargeA: '40',
+          maxTotalChargeA: '80',
+          battBulkV: '56.4',
+          battFloatV: '54.0',
+          battCutOffV: '42.0',
+          battBackGridV: '46.0',
+          ...(JSON.parse(raw) as Partial<LabWorkbenchConfig>),
+        };
+      }
     } catch {}
     return {
+      battType: 'USE',
+      chargeSource: 'SNU',
       eqEnabled: false,
       eqVoltage: '14.6',
       eqTimeMin: '60',
@@ -237,11 +270,18 @@ export const TestTabPanel: React.FC<TestTabPanelProps> = ({
       dualOutputEnabled: false,
       dualOutputCutOffV: '44.0',
       gridFeedEnabled: false,
+      gridFeedWatts: '0',
       maxAcChargeA: '40',
       maxTotalChargeA: '80',
+      battBulkV: '56.4',
+      battFloatV: '54.0',
+      battCutOffV: '42.0',
+      battBackGridV: '46.0',
     };
   });
   const [labSavedNotice, setLabSavedNotice] = useState<boolean>(false);
+  const [labSaving, setLabSaving] = useState<boolean>(false);
+  const [labFeedback, setLabFeedback] = useState<string | null>(null);
 
   const fetchDiagnostics = useCallback(
     async (force = false) => {
@@ -271,6 +311,8 @@ export const TestTabPanel: React.FC<TestTabPanelProps> = ({
         }
         setLabConfig((prev) => ({
           ...prev,
+          battType: json.diagnostics!.battType || prev.battType,
+          chargeSource: json.diagnostics!.chargeSource || prev.chargeSource,
           eqEnabled: json.diagnostics!.eqStatus === 1 || prev.eqEnabled,
           eqTimeMin: String(json.diagnostics!.eqTimeMin || 60),
           eqIntervalDays: String(json.diagnostics!.eqIntervalDays || 30),
@@ -278,6 +320,10 @@ export const TestTabPanel: React.FC<TestTabPanelProps> = ({
           gridFeedEnabled: json.diagnostics!.gridFeed === 1 || prev.gridFeedEnabled,
           maxAcChargeA: String(json.diagnostics!.battMaxAcChrgA || 40),
           maxTotalChargeA: String(json.diagnostics!.battMaxChrgA || 80),
+          battBulkV: json.diagnostics!.battBulkV > 0 ? json.diagnostics!.battBulkV.toFixed(1) : prev.battBulkV,
+          battFloatV: json.diagnostics!.battFloatV > 0 ? json.diagnostics!.battFloatV.toFixed(1) : prev.battFloatV,
+          battCutOffV: json.diagnostics!.cutOffVolts > 0 ? json.diagnostics!.cutOffVolts.toFixed(1) : prev.battCutOffV,
+          battBackGridV: json.diagnostics!.backToGridV > 0 ? json.diagnostics!.backToGridV.toFixed(1) : prev.battBackGridV,
         }));
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Unable to reach InverterZone Cloud');
@@ -345,13 +391,81 @@ export const TestTabPanel: React.FC<TestTabPanelProps> = ({
     }
   };
 
-  const handleSaveLabWorkbench = (e: React.FormEvent) => {
+  const pushLabCommand = async (action: string, value: string, label: string) => {
+    if (!accountSession?.token) {
+      setLabFeedback(`${label}: saved locally (sign in with account to send live command).`);
+      return;
+    }
+    try {
+      const res = await sendInverterCommand(accountSession.token, action, {
+        deviceId: device.id,
+        value,
+      });
+      setLabFeedback(res.accepted ? `${label}: ${res.msg}` : `${label}: ${res.msg}`);
+    } catch (err) {
+      setLabFeedback(err instanceof Error ? err.message : `Failed to send ${label}`);
+    }
+  };
+
+  const handleSaveLabWorkbench = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       localStorage.setItem(`${LAB_STORAGE_PREFIX}${device.id}`, JSON.stringify(labConfig));
     } catch {}
-    setLabSavedNotice(true);
-    setTimeout(() => setLabSavedNotice(false), 2000);
+    setLabSaving(true);
+    setLabFeedback(null);
+
+    if (!accountSession?.token) {
+      setLabSaving(false);
+      setLabSavedNotice(true);
+      setLabFeedback('Saved profile locally. Sign in with your InverterZone account to push hardware commands.');
+      setTimeout(() => setLabSavedNotice(false), 2000);
+      return;
+    }
+
+    try {
+      const cmds: Array<[string, string]> = [
+        ['chnageBatTypeSettings', labConfig.battType],
+        ['changeBattChargeSource', labConfig.chargeSource],
+        ['changeMaxCharge', labConfig.maxTotalChargeA],
+        ['changeAcCharge', labConfig.maxAcChargeA],
+        ['changeBattBulk', labConfig.battBulkV],
+        ['changeFloat', labConfig.battFloatV],
+        ['changeCutOffVolt', labConfig.battCutOffV],
+        ['changeBackGrid', labConfig.battBackGridV],
+        ['changeEqStatus', labConfig.eqEnabled ? '1' : '0'],
+        ['changeEqVolatge', labConfig.eqVoltage],
+        ['changeEqTime', labConfig.eqTimeMin],
+        ['chnageEqInterval', labConfig.eqIntervalDays],
+        ['dualOutputSettings', labConfig.dualOutputEnabled ? '1' : '0'],
+        ['changeDualOutputVolt', labConfig.dualOutputCutOffV],
+        ['changeGridFeed', labConfig.gridFeedEnabled ? labConfig.gridFeedWatts || '100' : '0'],
+      ];
+
+      let sent = 0;
+      let rejected = 0;
+      for (const [action, value] of cmds) {
+        if (!value) continue;
+        const r = await sendInverterCommand(accountSession.token, action, {
+          deviceId: device.id,
+          value,
+        });
+        if (r.accepted) sent += 1;
+        else rejected += 1;
+      }
+
+      setLabSavedNotice(true);
+      setLabFeedback(
+        rejected === 0
+          ? `Pushed ${sent} charger & equalization settings to InverterZone Cloud.`
+          : `Sent ${sent} commands (${rejected} rejected by inverter permissions).`
+      );
+      setTimeout(() => setLabSavedNotice(false), 2400);
+    } catch (err) {
+      setLabFeedback(err instanceof Error ? err.message : 'Unable to push hardware profile.');
+    } finally {
+      setLabSaving(false);
+    }
   };
 
   const pi30Frames = useMemo(() => (diag ? buildPi30Frames(diag) : null), [diag]);
@@ -424,7 +538,7 @@ export const TestTabPanel: React.FC<TestTabPanelProps> = ({
       </section>
 
       {/* AI & Cloud Intelligence Suite (Cloud 30-Day Audit, AI Health Doctor, Weather Forecast, SmartTimer Rules & AI Engineer) */}
-      <AiCloudSuitePanel device={device} diag={diag} />
+      <AiCloudSuitePanel device={device} diag={diag} accountSession={accountSession} />
 
       {/* 1. Dongle ESP MCU, LAN IP, True RSSI & Cloud Package Validity */}
       <section className="rounded-2xl bg-white dark:bg-[#171E26] border border-slate-200 dark:border-slate-800/80 p-5 space-y-4">
@@ -788,7 +902,7 @@ export const TestTabPanel: React.FC<TestTabPanelProps> = ({
           <CompactKv label="Charge Priority" value={`HW ${diag.chargeSource} / Cloud ${diag.cloudChargeMode}`} />
         </div>
 
-        {/* Interactive Equalization, Dual Output & Grid-Feed Workbench */}
+        {/* Interactive Charger, Equalization, Dual Output & Grid-Feed Workbench */}
         <form onSubmit={handleSaveLabWorkbench} className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-3.5 text-xs sm:text-sm">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <label className="rounded-xl bg-slate-100/80 dark:bg-[#11161D] p-3.5 flex items-center justify-between gap-2 cursor-pointer">
@@ -799,7 +913,11 @@ export const TestTabPanel: React.FC<TestTabPanelProps> = ({
               <input
                 type="checkbox"
                 checked={labConfig.eqEnabled}
-                onChange={(e) => setLabConfig((p) => ({ ...p, eqEnabled: e.target.checked }))}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setLabConfig((p) => ({ ...p, eqEnabled: checked }));
+                  void pushLabCommand('changeEqStatus', checked ? '1' : '0', 'Battery Equalization');
+                }}
                 className="w-5 h-5 accent-emerald-500 rounded cursor-pointer"
               />
             </label>
@@ -814,9 +932,11 @@ export const TestTabPanel: React.FC<TestTabPanelProps> = ({
               <input
                 type="checkbox"
                 checked={labConfig.dualOutputEnabled}
-                onChange={(e) =>
-                  setLabConfig((p) => ({ ...p, dualOutputEnabled: e.target.checked }))
-                }
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setLabConfig((p) => ({ ...p, dualOutputEnabled: checked }));
+                  void pushLabCommand('dualOutputSettings', checked ? '1' : '0', 'Dual AC Output');
+                }}
                 className="w-5 h-5 accent-emerald-500 rounded cursor-pointer"
               />
             </label>
@@ -831,15 +951,82 @@ export const TestTabPanel: React.FC<TestTabPanelProps> = ({
               <input
                 type="checkbox"
                 checked={labConfig.gridFeedEnabled}
-                onChange={(e) =>
-                  setLabConfig((p) => ({ ...p, gridFeedEnabled: e.target.checked }))
-                }
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setLabConfig((p) => ({ ...p, gridFeedEnabled: checked }));
+                  void pushLabCommand(
+                    'changeGridFeed',
+                    checked ? labConfig.gridFeedWatts || '100' : '0',
+                    'Solar Grid-Feed'
+                  );
+                }}
                 className="w-5 h-5 accent-emerald-500 rounded cursor-pointer"
               />
             </label>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <label className="block">
+              <span className="text-[11px] text-slate-500 dark:text-slate-400">Battery Type</span>
+              <select
+                value={labConfig.battType}
+                onChange={(e) => setLabConfig((p) => ({ ...p, battType: e.target.value }))}
+                className="mt-1 w-full min-h-[40px] px-2.5 rounded-lg bg-slate-100 dark:bg-[#11161D] border border-slate-300 dark:border-slate-700 font-mono text-slate-900 dark:text-white"
+              >
+                <option value="AGM">AGM</option>
+                <option value="FLD">FLD (Flooded)</option>
+                <option value="USE">USE (User Defined)</option>
+                <option value="PYL">PYL (Pylontech)</option>
+                <option value="WEC">WEC (WeCo)</option>
+                <option value="SOL">SOL (Soltaro)</option>
+                <option value="LIB">LIB (Lithium)</option>
+                <option value="LIC">LIC (LiFePO4)</option>
+                <option value="VSC">VSC</option>
+                <option value="LIL">LIL</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-[11px] text-slate-500 dark:text-slate-400">Charge Priority</span>
+              <select
+                value={labConfig.chargeSource}
+                onChange={(e) => setLabConfig((p) => ({ ...p, chargeSource: e.target.value }))}
+                className="mt-1 w-full min-h-[40px] px-2.5 rounded-lg bg-slate-100 dark:bg-[#11161D] border border-slate-300 dark:border-slate-700 font-mono text-slate-900 dark:text-white"
+              >
+                <option value="CSO">CSO (Solar First)</option>
+                <option value="SNU">SNU (Solar + Utility)</option>
+                <option value="OSO">OSO (Only Solar)</option>
+              </select>
+            </label>
+            <LabInput
+              label="Max Total Charge (A)"
+              value={labConfig.maxTotalChargeA}
+              onChange={(v) => setLabConfig((p) => ({ ...p, maxTotalChargeA: v }))}
+            />
+            <LabInput
+              label="Max AC Charge (A)"
+              value={labConfig.maxAcChargeA}
+              onChange={(v) => setLabConfig((p) => ({ ...p, maxAcChargeA: v }))}
+            />
+            <LabInput
+              label="Bulk / CV Voltage (V)"
+              value={labConfig.battBulkV}
+              onChange={(v) => setLabConfig((p) => ({ ...p, battBulkV: v }))}
+            />
+            <LabInput
+              label="Float Voltage (V)"
+              value={labConfig.battFloatV}
+              onChange={(v) => setLabConfig((p) => ({ ...p, battFloatV: v }))}
+            />
+            <LabInput
+              label="Low Cut-Off (V)"
+              value={labConfig.battCutOffV}
+              onChange={(v) => setLabConfig((p) => ({ ...p, battCutOffV: v }))}
+            />
+            <LabInput
+              label="Back-to-Grid (V)"
+              value={labConfig.battBackGridV}
+              onChange={(v) => setLabConfig((p) => ({ ...p, battBackGridV: v }))}
+            />
             <LabInput
               label="Eq Voltage (V)"
               value={labConfig.eqVoltage}
@@ -862,19 +1049,44 @@ export const TestTabPanel: React.FC<TestTabPanelProps> = ({
             />
           </div>
 
-          <button
-            type="submit"
-            className="min-h-[44px] px-5 rounded-xl bg-slate-900 dark:bg-[#232E3C] hover:opacity-90 text-white text-xs font-semibold inline-flex items-center gap-2 cursor-pointer"
-          >
-            {labSavedNotice ? (
-              <>
-                <Check className="w-4 h-4 text-emerald-400" />
-                <span>Saved Advanced Charger &amp; Equalization Profile</span>
-              </>
-            ) : (
-              <span>Save Charger &amp; Equalization Test Profile</span>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              type="submit"
+              disabled={labSaving}
+              className="min-h-[44px] px-5 rounded-xl bg-slate-900 dark:bg-emerald-600 hover:opacity-90 text-white text-xs font-semibold inline-flex items-center gap-2 cursor-pointer disabled:opacity-60"
+            >
+              {labSavedNotice ? (
+                <>
+                  <Check className="w-4 h-4 text-emerald-300" />
+                  <span>{accountSession ? 'Synced Charger & Eq Settings' : 'Saved Local Profile'}</span>
+                </>
+              ) : (
+                <span>
+                  {labSaving
+                    ? 'Pushing to InverterZone Cloud...'
+                    : accountSession
+                      ? 'Apply Charger & Eq Profile to Cloud'
+                      : 'Save Charger & Equalization Profile'}
+                </span>
+              )}
+            </button>
+
+            {accountSession && (
+              <button
+                type="button"
+                onClick={() => void pushLabCommand('changeEqActivate', '1', 'Equalization Trigger (QBEQI)')}
+                className="min-h-[44px] px-4 rounded-xl bg-slate-100 dark:bg-[#222C38] hover:bg-slate-200 dark:hover:bg-[#2B3746] text-xs font-semibold text-slate-800 dark:text-slate-200 cursor-pointer"
+              >
+                Trigger Eq Now
+              </button>
             )}
-          </button>
+          </div>
+
+          {labFeedback && (
+            <p className="text-xs font-mono text-emerald-700 dark:text-emerald-400">
+              {labFeedback}
+            </p>
+          )}
         </form>
       </section>
 

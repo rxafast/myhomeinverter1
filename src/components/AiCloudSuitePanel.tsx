@@ -24,10 +24,13 @@ import {
   SmartRuleMetric,
 } from '../types/inverter';
 import { getApiUrl } from '../utils/apiConfig';
+import { InverterZoneAccountSession } from '../utils/inverterzoneAuth';
+import { callSmartTimer, readCloudEndpoint } from '../utils/inverterzoneApi';
 
 interface AiCloudSuitePanelProps {
   device: DeviceConfig;
   diag: DongleExtendedDiagnostics;
+  accountSession?: InverterZoneAccountSession | null;
 }
 
 const METRIC_LABELS: Record<SmartRuleMetric, { label: string; unit: string }> = {
@@ -74,13 +77,25 @@ function evaluateRuleCondition(
   return { liveValue, matched };
 }
 
-export const AiCloudSuitePanel: React.FC<AiCloudSuitePanelProps> = ({ device, diag }) => {
+export const AiCloudSuitePanel: React.FC<AiCloudSuitePanelProps> = ({
+  device,
+  diag,
+  accountSession = null,
+}) => {
   const [bundle, setBundle] = useState<CloudAiLabBundle | null>(null);
   const [loadingBundle, setLoadingBundle] = useState<boolean>(true);
 
   /* AI Diagnostics State */
   const [runningDiag, setRunningDiag] = useState<boolean>(false);
   const [diagError, setDiagError] = useState<string | null>(null);
+
+  /* Cloud AI Sessions & Telemetry Profiles State */
+  const [cloudAiBusy, setCloudAiBusy] = useState<boolean>(false);
+  const [cloudAiStatusText, setCloudAiStatusText] = useState<string | null>(null);
+  const [cloudProfiles, setCloudProfiles] = useState<Array<Record<string, unknown>>>([]);
+  const [smartTimerSyncMsg, setSmartTimerSyncMsg] = useState<string | null>(null);
+  const [smartTimerBusy, setSmartTimerBusy] = useState<boolean>(false);
+  const [cloudRules, setCloudRules] = useState<Array<Record<string, unknown>>>([]);
 
   /* AI Solar Forecast State */
   const [locationInput, setLocationInput] = useState<string>('Lahore, Pakistan');
@@ -174,6 +189,120 @@ export const AiCloudSuitePanel: React.FC<AiCloudSuitePanelProps> = ({ device, di
       setDiagError(err instanceof Error ? err.message : 'Unable to generate AI diagnostics');
     } finally {
       setRunningDiag(false);
+    }
+  };
+
+  const handleCloudAiSessionAction = async (
+    action: 'aiStatus' | 'aiSessionStart' | 'aiSessionStop' | 'profiles'
+  ) => {
+    if (!accountSession?.token) return;
+    setCloudAiBusy(true);
+    try {
+      const res = await readCloudEndpoint<unknown>(
+        action,
+        action === 'aiStatus' ? {} : { deviceId: device.id },
+        accountSession.token
+      );
+      if (action === 'profiles') {
+        const list = Array.isArray(res)
+          ? res
+          : res && typeof res === 'object' && Array.isArray((res as { data?: unknown[] }).data)
+            ? (res as { data: unknown[] }).data
+            : [];
+        const rows = list.filter((x): x is Record<string, unknown> => Boolean(x && typeof x === 'object'));
+        setCloudProfiles(rows);
+        setCloudAiStatusText(`Loaded ${rows.length} InverterZone Cloud telemetry profile(s).`);
+      } else {
+        setCloudAiStatusText(
+          `${action}: ${
+            res && typeof res === 'object'
+              ? JSON.stringify(res).slice(0, 120)
+              : String(res ?? 'Updated')
+          }`
+        );
+      }
+    } catch (err) {
+      setCloudAiStatusText(err instanceof Error ? err.message : 'Cloud AI call failed');
+    } finally {
+      setCloudAiBusy(false);
+    }
+  };
+
+  const handleProfileAction = async (
+    action: 'profileAnalyse' | 'profileReplay',
+    profileId: string
+  ) => {
+    if (!accountSession?.token) return;
+    setCloudAiBusy(true);
+    try {
+      const res = await readCloudEndpoint<unknown>(
+        action,
+        { deviceId: device.id, profileId },
+        accountSession.token
+      );
+      setCloudAiStatusText(
+        `${action} (${profileId}): ${
+          res && typeof res === 'object' ? JSON.stringify(res).slice(0, 110) : String(res ?? 'OK')
+        }`
+      );
+    } catch (err) {
+      setCloudAiStatusText(err instanceof Error ? err.message : 'Profile action failed');
+    } finally {
+      setCloudAiBusy(false);
+    }
+  };
+
+  const handleSyncCloudSmartTimer = async () => {
+    if (!accountSession?.token) return;
+    setSmartTimerBusy(true);
+    setSmartTimerSyncMsg(null);
+    try {
+      const res = await callSmartTimer<unknown>(accountSession.token, 'list', {
+        deviceId: device.id,
+      });
+      const list = Array.isArray(res)
+        ? res
+        : res && typeof res === 'object' && Array.isArray((res as { data?: unknown[] }).data)
+          ? (res as { data: unknown[] }).data
+          : res && typeof res === 'object' && Array.isArray((res as { rules?: unknown[] }).rules)
+            ? (res as { rules: unknown[] }).rules
+            : [];
+      const rows = list.filter((r): r is Record<string, unknown> => Boolean(r && typeof r === 'object'));
+      setCloudRules(rows);
+      setSmartTimerSyncMsg(`Synced ${rows.length} cloud SmartTimer rule(s) for ${device.id}.`);
+    } catch (err) {
+      setSmartTimerSyncMsg(err instanceof Error ? err.message : 'Unable to sync SmartTimer rules.');
+    } finally {
+      setSmartTimerBusy(false);
+    }
+  };
+
+  const handlePublishRuleToCloud = async (rule: SmartConditionalRule) => {
+    if (!accountSession?.token) return;
+    setSmartTimerBusy(true);
+    try {
+      const saved = await callSmartTimer<Record<string, unknown>>(accountSession.token, 'save', {
+        deviceId: device.id,
+        name: rule.name,
+        metric: rule.metric,
+        operator: rule.operator,
+        threshold: rule.threshold,
+        targetSetting: rule.targetSetting,
+        targetValue: rule.targetValue,
+        enabled: rule.enabled,
+      });
+      const ruleId = saved && (saved.id ?? saved.ruleId);
+      if (ruleId) {
+        await callSmartTimer(accountSession.token, rule.enabled ? 'publish' : 'unpublish', {
+          deviceId: device.id,
+          id: ruleId,
+        });
+      }
+      setSmartTimerSyncMsg(`Saved & published "${rule.name}" to InverterZone SmartTimer Cloud.`);
+    } catch (err) {
+      setSmartTimerSyncMsg(err instanceof Error ? err.message : 'Cloud SmartTimer save failed.');
+    } finally {
+      setSmartTimerBusy(false);
     }
   };
 
@@ -564,6 +693,91 @@ export const AiCloudSuitePanel: React.FC<AiCloudSuitePanelProps> = ({ device, di
             {diag.panelWatts}W {diag.panelCompany} array, PV1/PV2 balance, HV DC bus, and PI30 settings.
           </p>
         )}
+
+        {accountSession && (
+          <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                InverterZone Cloud AI Sessions &amp; Telemetry Profiles
+              </span>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={cloudAiBusy}
+                  onClick={() => void handleCloudAiSessionAction('aiStatus')}
+                  className="min-h-[36px] px-2.5 rounded-lg bg-slate-100 dark:bg-[#11161D] hover:bg-slate-200 dark:hover:bg-[#1E2732] text-[11px] font-semibold text-slate-700 dark:text-slate-300 cursor-pointer disabled:opacity-50"
+                >
+                  AI Status
+                </button>
+                <button
+                  type="button"
+                  disabled={cloudAiBusy}
+                  onClick={() => void handleCloudAiSessionAction('aiSessionStart')}
+                  className="min-h-[36px] px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold cursor-pointer disabled:opacity-50"
+                >
+                  Start Cloud Session
+                </button>
+                <button
+                  type="button"
+                  disabled={cloudAiBusy}
+                  onClick={() => void handleCloudAiSessionAction('aiSessionStop')}
+                  className="min-h-[36px] px-2.5 rounded-lg bg-slate-100 dark:bg-[#11161D] hover:bg-slate-200 dark:hover:bg-[#1E2732] text-[11px] font-semibold text-slate-700 dark:text-slate-300 cursor-pointer disabled:opacity-50"
+                >
+                  Stop Session
+                </button>
+                <button
+                  type="button"
+                  disabled={cloudAiBusy}
+                  onClick={() => void handleCloudAiSessionAction('profiles')}
+                  className="min-h-[36px] px-2.5 rounded-lg bg-slate-100 dark:bg-[#11161D] hover:bg-slate-200 dark:hover:bg-[#1E2732] text-[11px] font-semibold text-slate-700 dark:text-slate-300 cursor-pointer disabled:opacity-50"
+                >
+                  Cloud Profiles
+                </button>
+              </div>
+            </div>
+
+            {cloudAiStatusText && (
+              <p className="text-[11px] font-mono text-emerald-700 dark:text-emerald-400">
+                {cloudAiStatusText}
+              </p>
+            )}
+
+            {cloudProfiles.length > 0 && (
+              <div className="divide-y divide-slate-200 dark:divide-slate-800 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden text-xs">
+                {cloudProfiles.slice(0, 5).map((prof, idx) => {
+                  const pId = String(prof.id ?? prof.profileId ?? idx);
+                  const pName = String(prof.name ?? prof.title ?? `Profile #${pId}`);
+                  return (
+                    <div
+                      key={pId}
+                      className="px-3 py-2 bg-slate-50/70 dark:bg-[#131A22] flex items-center justify-between gap-2"
+                    >
+                      <span className="font-mono text-slate-800 dark:text-slate-200 truncate">
+                        {pName}
+                      </span>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => void handleProfileAction('profileAnalyse', pId)}
+                          className="min-h-[34px] px-2.5 rounded-lg bg-slate-200 dark:bg-[#222C38] text-[11px] font-semibold cursor-pointer"
+                        >
+                          Analyse
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleProfileAction('profileReplay', pId)}
+                          className="min-h-[34px] px-2.5 rounded-lg bg-emerald-600 text-white text-[11px] font-semibold cursor-pointer"
+                        >
+                          Replay
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </section>
 
       {/* C. AI Weather-Grounded Solar Yield & Load-Shifting Planner */}
@@ -706,7 +920,18 @@ export const AiCloudSuitePanel: React.FC<AiCloudSuitePanelProps> = ({ device, di
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {accountSession && (
+              <button
+                type="button"
+                onClick={() => void handleSyncCloudSmartTimer()}
+                disabled={smartTimerBusy}
+                className="min-h-[40px] px-3 rounded-xl bg-slate-100 dark:bg-[#222C38] hover:bg-slate-200 dark:hover:bg-[#2B3746] text-xs font-semibold text-slate-800 dark:text-slate-200 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${smartTimerBusy ? 'animate-spin' : ''}`} />
+                <span>Sync Cloud SmartTimer</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setShowAddRule((v) => !v)}
@@ -730,6 +955,28 @@ export const AiCloudSuitePanel: React.FC<AiCloudSuitePanelProps> = ({ device, di
             </button>
           </div>
         </div>
+
+        {smartTimerSyncMsg && (
+          <p className="text-xs font-mono text-emerald-700 dark:text-emerald-400">
+            {smartTimerSyncMsg}
+          </p>
+        )}
+
+        {cloudRules.length > 0 && (
+          <div className="rounded-xl bg-slate-100/80 dark:bg-[#11161D] p-3 text-xs space-y-1.5">
+            <p className="font-semibold text-slate-700 dark:text-slate-300">
+              InverterZone Cloud SmartTimer Rules ({cloudRules.length})
+            </p>
+            {cloudRules.slice(0, 5).map((cr, i) => (
+              <div key={String(cr.id ?? i)} className="flex items-center justify-between gap-2 font-mono text-[11px] text-slate-600 dark:text-slate-400">
+                <span className="truncate">{String(cr.name ?? cr.rule ?? JSON.stringify(cr))}</span>
+                <span className="text-emerald-600 dark:text-emerald-400 shrink-0">
+                  {cr.published === true || cr.status === 1 ? 'Published' : 'Saved'}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
 
         {rulesError && (
           <div className="rounded-xl bg-red-500/10 border border-red-500/30 p-3 text-xs text-red-700 dark:text-red-300">
@@ -854,6 +1101,16 @@ export const AiCloudSuitePanel: React.FC<AiCloudSuitePanelProps> = ({ device, di
                 </div>
 
                 <div className="flex items-center gap-2 shrink-0 pt-0.5">
+                  {accountSession && (
+                    <button
+                      type="button"
+                      onClick={() => void handlePublishRuleToCloud(rule)}
+                      disabled={smartTimerBusy}
+                      className="min-h-[36px] px-2.5 rounded-lg bg-slate-100 dark:bg-[#1E2733] hover:bg-slate-200 dark:hover:bg-[#293545] text-[11px] font-semibold text-slate-700 dark:text-slate-200 cursor-pointer disabled:opacity-50"
+                    >
+                      Push Cloud
+                    </button>
+                  )}
                   <input
                     type="checkbox"
                     checked={rule.enabled}

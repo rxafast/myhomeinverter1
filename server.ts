@@ -2258,6 +2258,264 @@ Respond ONLY with a single raw JSON object (no markdown code fences) matching th
     }
   });
 
+  const IZ_COMMAND_ACTIONS = new Set([
+    'outputModeSettings',
+    'outputVSettings',
+    'dualOutputSettings',
+    'changeDualOutputVolt',
+    'powerPrioritySettings',
+    'sourceInterruptSettings',
+    'changeAcInputRange',
+    'changeGridFeed',
+    'chnageBatTypeSettings',
+    'changeBattChargeSource',
+    'changeMaxCharge',
+    'changeAcCharge',
+    'changeBattBulk',
+    'changeFloat',
+    'changeCutOffVolt',
+    'changeBackGrid',
+    'changeBackDischarge',
+    'setBatteryInfo',
+    'changeEqActivate',
+    'changeEqStatus',
+    'changeEqTime',
+    'changeEqVolatge',
+    'chnageEqInterval',
+    'buzzerSettings',
+    'backlightSettings',
+    'lcdDefaultSettings',
+    'faultRecordSettings',
+    'overloadBypassSettings',
+    'overloadRestartSettings',
+    'overloadTempSettings',
+    'resetDevice',
+    'changeRate',
+    'netMetering',
+    'setBillDay',
+    'setUnitLimit',
+    'chnageDeviceName',
+    'changeBrandName',
+    'changeModelName',
+    'savePanelInfo',
+    'sendLocation',
+    'addFavorites',
+    'removeFavDevice',
+    'sendOTAUpdate',
+    'addAccess',
+    'removeAcess',
+    'leaveSharedDevice',
+    'addIimer',
+    'updateIimer',
+    'editTimerData',
+    'removeTimer',
+    'timerChange',
+    'addDualPvDevice',
+    'removeDualPv',
+    'readNotifications',
+    'clearNotifications',
+    'removeAlert',
+    'removeDevicePhoto',
+    'aiSessionStart',
+    'aiSessionStop',
+    'profileAnalyse',
+    'profileReplay',
+    'profileUnpublish',
+  ]);
+
+  const IZ_CLOUD_READ_ACTIONS = new Set([
+    'getAlertsSummary',
+    'getGroupAlerts',
+    'getRecords',
+    'getNotificationsCount',
+    'getBmsDevices',
+    'getDualPVDevices',
+    'searchDualPvDevice',
+    'accessShareDevices',
+    'checkOwnerAccess',
+    'favDevicesMore',
+    'nearbyBatteries',
+    'aiStatus',
+    'aiSessions',
+    'profiles',
+    'profilePreview',
+    'getDevicePhoto',
+    'hasDevicePhoto',
+    'getTimerData',
+    'getTimerDevices',
+    'getMyTimerDevices',
+    'getTimerSettingDropdown',
+    'getTimerValueDropdown',
+  ]);
+
+  const IZ_SMARTTIMER_ACTIONS = new Set([
+    'list',
+    'save',
+    'delete',
+    'publish',
+    'unpublish',
+    'deviceRules',
+    'variables',
+    'actions',
+    'feature',
+    'parse',
+  ]);
+
+  const forwardInverterZoneForm = async (url: string, params: Record<string, string>) => {
+    return scheduleUpstreamRequest('high', async () => {
+      const upstream = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body: new URLSearchParams(params).toString(),
+      });
+      if (!upstream.ok) {
+        throw new Error(`InverterZone returned HTTP ${upstream.status}`);
+      }
+      const rawText = (await upstream.text()).trim();
+      if (!rawText || rawText === 'null') {
+        return null;
+      }
+      try {
+        return JSON.parse(rawText) as unknown;
+      } catch {
+        return rawText;
+      }
+    });
+  };
+
+  app.post('/api/iz/command', async (req, res) => {
+    try {
+      const action = String(req.body?.action ?? '').trim();
+      const payload =
+        req.body?.payload && typeof req.body.payload === 'object'
+          ? { ...(req.body.payload as Record<string, unknown>) }
+          : {};
+      if (!IZ_COMMAND_ACTIONS.has(action)) {
+        res.status(400).json({ ok: false, error: `Unsupported command action: ${action}` });
+        return;
+      }
+      const token = String(payload.token ?? req.body?.token ?? '').trim();
+      if (!token) {
+        res.status(400).json({ ok: false, error: 'Auth token required for cloud control commands.' });
+        return;
+      }
+      payload.token = token;
+      const data = await forwardInverterZonePost(
+        `https://inverterzone.com/api/${action}`,
+        payload
+      );
+      res.json({ ok: true, data });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to execute InverterZone command',
+      });
+    }
+  });
+
+  app.post('/api/iz/cloud-read', async (req, res) => {
+    try {
+      const action = String(req.body?.action ?? '').trim();
+      const payload =
+        req.body?.payload && typeof req.body.payload === 'object'
+          ? { ...(req.body.payload as Record<string, unknown>) }
+          : {};
+      if (!IZ_CLOUD_READ_ACTIONS.has(action)) {
+        res.status(400).json({ ok: false, error: `Unsupported cloud-read action: ${action}` });
+        return;
+      }
+      const token = String(payload.token ?? req.body?.token ?? '').trim();
+      if (action !== 'nearbyBatteries' && !token) {
+        res.status(400).json({ ok: false, error: 'Auth token required.' });
+        return;
+      }
+      if (token) {
+        payload.token = token;
+      }
+      const data = await forwardInverterZonePost(
+        `https://inverterzone.com/api/${action}`,
+        payload
+      );
+      res.json({ ok: true, data });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to fetch InverterZone cloud data',
+      });
+    }
+  });
+
+  app.post('/api/iz/smarttimer', async (req, res) => {
+    try {
+      const subAction = String(req.body?.subAction ?? '').trim();
+      const payload =
+        req.body?.payload && typeof req.body.payload === 'object'
+          ? { ...(req.body.payload as Record<string, unknown>) }
+          : {};
+      if (!IZ_SMARTTIMER_ACTIONS.has(subAction)) {
+        res.status(400).json({ ok: false, error: `Unsupported smarttimer action: ${subAction}` });
+        return;
+      }
+      const token = String(payload.token ?? req.body?.token ?? '').trim();
+      if (!token) {
+        res.status(400).json({ ok: false, error: 'Auth token required.' });
+        return;
+      }
+      payload.token = token;
+      const data = await forwardInverterZonePost(
+        `https://inverterzone.com/api/smarttimer/${subAction}`,
+        payload
+      );
+      res.json({ ok: true, data });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'SmartTimer cloud request failed',
+      });
+    }
+  });
+
+  app.post('/api/iz/runway', async (req, res) => {
+    try {
+      const deviceId = String(req.body?.deviceId ?? req.body?.device ?? '').trim().toUpperCase();
+      if (!/^[A-Za-z0-9_-]{4,32}$/.test(deviceId)) {
+        res.status(400).json({ ok: false, error: 'Valid deviceId required.' });
+        return;
+      }
+      const data = await forwardInverterZoneForm(
+        'https://inverterzone.com/api/getBatteryRunway',
+        { device: deviceId }
+      );
+      res.json({ ok: true, data });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to fetch battery runway',
+      });
+    }
+  });
+
+  app.post('/api/iz/energy-insights', async (req, res) => {
+    try {
+      const deviceId = String(req.body?.deviceId ?? req.body?.device ?? '').trim().toUpperCase();
+      const value = String(req.body?.value ?? 'T').trim();
+      if (!/^[A-Za-z0-9_-]{4,32}$/.test(deviceId)) {
+        res.status(400).json({ ok: false, error: 'Valid deviceId required.' });
+        return;
+      }
+      const data = await forwardInverterZoneForm(
+        'https://inverterzone.com/api/getEnergyInsights',
+        { device: deviceId, value }
+      );
+      res.json({ ok: true, data });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to fetch energy insights',
+      });
+    }
+  });
+
   // Background 60-second collector so live dashboard, Multi-MPPT & Today cloud energy stay fresh
   setInterval(async () => {
     const state = readPersistedState();

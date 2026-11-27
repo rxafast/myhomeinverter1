@@ -29,6 +29,7 @@ import {
   X,
 } from 'lucide-react';
 import { DevicePairingModal } from './components/DevicePairingModal';
+import { CloudHubModal } from './components/CloudHubModal';
 import {
   fetchInverterZoneAccountDevices,
   fetchInverterZoneDashboard,
@@ -39,6 +40,7 @@ import {
   loginInverterZoneAccount,
   saveAccountSession,
 } from './utils/inverterzoneAuth';
+import { sendInverterCommand } from './utils/inverterzoneApi';
 import {
   AccentThemeId,
   AlertThresholds,
@@ -175,6 +177,7 @@ export default function App() {
   const [offlineOpen, setOfflineOpen] = useState(false);
   const [nearbyOpen, setNearbyOpen] = useState(false);
   const [wallboardOpen, setWallboardOpen] = useState(false);
+  const [cloudHubOpen, setCloudHubOpen] = useState(false);
   const [editingDevice, setEditingDevice] = useState<DeviceConfig | null | 'new'>(null);
   const [previewNearbyDevice, setPreviewNearbyDevice] = useState<{
     config: DeviceConfig;
@@ -856,12 +859,12 @@ export default function App() {
       gridVoltage: 229.4,
       gridAmpere: Number((Math.abs(gridWatts) / 229.4).toFixed(1)),
       gridHz: 50.0,
-      batteryVoltage: 0.0,
+      batteryVoltage: plant.battV ?? 0.0,
       chargingAmpere: 0.0,
       dischargingAmpere: 0.0,
-      batteryPercentage: 0,
+      batteryPercentage: plant.battPct ?? 0,
       batteryWatts: 0,
-      batteryState: 'no-battery',
+      batteryState: (plant.battV ?? 0) > 10 ? 'idle' : 'no-battery',
       mode: solarWatts > 0 ? 'SUB' : 'USB',
       chargingMode: 'SNU',
       fanSpeed: solarWatts > 3000 ? 52 : 34,
@@ -968,10 +971,25 @@ export default function App() {
     }
   };
 
-  const toggleFavorite = (deviceId: string) => {
+  const handleRenameDevice = (deviceId: string, nextName: string) => {
     setDevices((prev) =>
-      prev.map((d) => (d.id === deviceId ? { ...d, favorite: !d.favorite } : d))
+      prev.map((d) => (d.id === deviceId ? { ...d, name: nextName } : d))
     );
+  };
+
+  const toggleFavorite = (deviceId: string) => {
+    const target = devices.find((d) => d.id === deviceId);
+    const willBeFav = target ? !target.favorite : true;
+    setDevices((prev) =>
+      prev.map((d) => (d.id === deviceId ? { ...d, favorite: willBeFav } : d))
+    );
+    if (accountSession?.token) {
+      void sendInverterCommand(
+        accountSession.token,
+        willBeFav ? 'addFavorites' : 'removeFavDevice',
+        { deviceId }
+      ).catch(() => {});
+    }
   };
 
   const copyDeviceId = async (id: string) => {
@@ -1061,6 +1079,7 @@ export default function App() {
           activeTab={detailTab}
           isRefreshing={isRefreshing}
           nowTimestamp={nowTimestamp}
+          accountSession={accountSession}
           onChangeTab={setDetailTab}
           onBack={() => {
             setSelectedDeviceId(null);
@@ -1079,6 +1098,12 @@ export default function App() {
           onUpdateDailySummary={handleUpdateDailySummary}
           onSendDailySummaryTest={(id) => triggerDailySummary(id, true)}
           onUpdateInverterSettings={handleUpdateInverterSettings}
+          onRenameDevice={handleRenameDevice}
+          onOpenAccountLogin={() => {
+            setPairingModalMode('account');
+            setPairingModalOpen(true);
+          }}
+          onOpenCloudHub={() => setCloudHubOpen(true)}
           onClearFaultLogs={handleClearFaultLogs}
           onUpdateThresholds={setThresholds}
           nearbyBadge={
@@ -1091,6 +1116,18 @@ export default function App() {
           accent={accent}
           onSelectAccent={setAccent}
           onClose={() => setPaletteOpen(false)}
+        />
+
+        <CloudHubModal
+          open={cloudHubOpen}
+          deviceId={selectedDevice.id}
+          accountSession={accountSession}
+          onOpenAccountLogin={() => {
+            setCloudHubOpen(false);
+            setPairingModalMode('account');
+            setPairingModalOpen(true);
+          }}
+          onClose={() => setCloudHubOpen(false)}
         />
 
         <DevicePairingModal
@@ -1668,6 +1705,7 @@ export default function App() {
         onNavigateDeviceTab={(tab) => openDeviceDetail(primaryDevice.id, tab)}
         onOpenAddDevice={() => setEditingDevice('new')}
         onOpenPairing={() => setPairingModalOpen(true)}
+        onOpenCloudHub={() => setCloudHubOpen(true)}
       />
 
       <PalettePickerModal
@@ -1680,6 +1718,8 @@ export default function App() {
       <TimersModal
         open={timersOpen}
         timers={timers}
+        deviceId={primaryDevice.id}
+        accountSession={accountSession}
         onAddTimer={(t) =>
           setTimers((prev) => [...prev, { ...t, id: `tm_${Date.now()}` }])
         }
@@ -1728,6 +1768,18 @@ export default function App() {
         onSave={handleSaveDevice}
         onDelete={devices.length > 1 ? handleDeleteDevice : undefined}
         onClose={() => setEditingDevice(null)}
+      />
+
+      <CloudHubModal
+        open={cloudHubOpen}
+        deviceId={selectedDeviceId || primaryDevice.id}
+        accountSession={accountSession}
+        onOpenAccountLogin={() => {
+          setCloudHubOpen(false);
+          setPairingModalMode('account');
+          setPairingModalOpen(true);
+        }}
+        onClose={() => setCloudHubOpen(false)}
       />
 
       <DevicePairingModal

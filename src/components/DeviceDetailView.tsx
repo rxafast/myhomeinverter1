@@ -35,6 +35,8 @@ import { SettingsTabPanel } from './SettingsTabPanel';
 import { Stat2TabPanel } from './Stat2TabPanel';
 import { TelemetryCharts } from './TelemetryCharts';
 import { TestTabPanel } from './TestTabPanel';
+import { CloudAlertsHistorySection } from './CloudAlertsHistorySection';
+import { InverterZoneAccountSession } from '../utils/inverterzoneAuth';
 
 interface DeviceDetailViewProps {
   device: DeviceConfig;
@@ -47,6 +49,7 @@ interface DeviceDetailViewProps {
   activeTab: DetailTab;
   isRefreshing: boolean;
   nowTimestamp: number;
+  accountSession?: InverterZoneAccountSession | null;
   onChangeTab: (tab: DetailTab) => void;
   onBack: () => void;
   onRefresh: () => void;
@@ -60,6 +63,9 @@ interface DeviceDetailViewProps {
     next: InverterSettingsConfig,
     summaryLabel?: string
   ) => void;
+  onRenameDevice?: (deviceId: string, nextName: string) => void;
+  onOpenAccountLogin?: () => void;
+  onOpenCloudHub?: () => void;
   onClearFaultLogs: (deviceId: string) => void;
   onUpdateThresholds: (next: AlertThresholds) => void;
   nearbyBadge?: string;
@@ -76,6 +82,7 @@ export const DeviceDetailView: React.FC<DeviceDetailViewProps> = ({
   activeTab,
   isRefreshing,
   nowTimestamp,
+  accountSession = null,
   onChangeTab,
   onBack,
   onRefresh,
@@ -85,6 +92,9 @@ export const DeviceDetailView: React.FC<DeviceDetailViewProps> = ({
   onUpdateDailySummary,
   onSendDailySummaryTest,
   onUpdateInverterSettings,
+  onRenameDevice,
+  onOpenAccountLogin,
+  onOpenCloudHub,
   onClearFaultLogs,
   onUpdateThresholds,
   nearbyBadge,
@@ -418,7 +428,7 @@ export const DeviceDetailView: React.FC<DeviceDetailViewProps> = ({
               </button>
             </div>
             {statsViewMode === 'cloud' ? (
-              <Stat2TabPanel device={device} telemetry={telemetry} />
+              <Stat2TabPanel device={device} telemetry={telemetry} accountSession={accountSession} />
             ) : (
               <TelemetryCharts samples={samples} deviceName={device.name} />
             )}
@@ -426,7 +436,9 @@ export const DeviceDetailView: React.FC<DeviceDetailViewProps> = ({
         )}
 
         {/* TAB 3: STAT2 (Dedicated InverterZone Cloud Energy & Analytics View) */}
-        {activeTab === 'stat2' && <Stat2TabPanel device={device} telemetry={telemetry} />}
+        {activeTab === 'stat2' && (
+          <Stat2TabPanel device={device} telemetry={telemetry} accountSession={accountSession} />
+        )}
 
         {/* TAB 4: ALERTS & FAULT CODE RECORD */}
         {activeTab === 'alerts' && (
@@ -530,6 +542,12 @@ export const DeviceDetailView: React.FC<DeviceDetailViewProps> = ({
                   </div>
                 )}
               </section>
+
+              <CloudAlertsHistorySection
+                deviceId={device.id}
+                accountSession={accountSession}
+                onOpenAccountLogin={onOpenAccountLogin ?? (() => {})}
+              />
             </div>
 
             <section className="lg:col-span-5 rounded-2xl bg-white dark:bg-[#171E26] border border-slate-200 dark:border-slate-800/80 p-5 space-y-4">
@@ -619,6 +637,7 @@ export const DeviceDetailView: React.FC<DeviceDetailViewProps> = ({
             device={device}
             telemetry={telemetry}
             rawPayload={rawPayload}
+            accountSession={accountSession}
             onUpdateNotifications={(next) => onUpdateNotifications(device.id, next)}
             onUpdateDailySummary={(next) => onUpdateDailySummary(device.id, next)}
             onSendDailySummaryTest={() => onSendDailySummaryTest(device.id)}
@@ -626,6 +645,11 @@ export const DeviceDetailView: React.FC<DeviceDetailViewProps> = ({
               onUpdateInverterSettings(device.id, next, label)
             }
             onSaveSolarPanels={(panels) => onSaveSolarPanels(device.id, panels)}
+            onRenameDevice={
+              onRenameDevice ? (nextName) => onRenameDevice(device.id, nextName) : undefined
+            }
+            onOpenAccountLogin={onOpenAccountLogin}
+            onOpenCloudHub={onOpenCloudHub}
           />
         )}
 
@@ -633,6 +657,7 @@ export const DeviceDetailView: React.FC<DeviceDetailViewProps> = ({
         {activeTab === 'test' && (
           <TestTabPanel
             device={device}
+            accountSession={accountSession}
             onSyncHardwareSettingsToProfile={(diag: DongleExtendedDiagnostics) => {
               const rawMode = diag.outputSource.trim().toUpperCase();
               const validMode =

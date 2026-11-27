@@ -34,6 +34,14 @@ import {
   REGION_PRESETS,
   saveGeoCenter,
 } from '../utils/inverterzoneAuth';
+import {
+  CloudTimerItem,
+  fetchCloudTimers,
+  fetchNearbyBatteries,
+  NearbyBatteryPlant,
+  readCloudEndpoint,
+  sendInverterCommand,
+} from '../utils/inverterzoneApi';
 import { DEFAULT_DEVICE_CONFIG } from '../utils/telemetry';
 
 /* 1. Navigation Drawer (Hamburger Menu) */
@@ -46,6 +54,7 @@ export const NavigationDrawer: React.FC<{
   onNavigateDeviceTab: (tab: DetailTab) => void;
   onOpenAddDevice: () => void;
   onOpenPairing?: () => void;
+  onOpenCloudHub?: () => void;
 }> = ({
   open,
   pollIntervalSec,
@@ -55,6 +64,7 @@ export const NavigationDrawer: React.FC<{
   onNavigateDeviceTab,
   onOpenAddDevice,
   onOpenPairing,
+  onOpenCloudHub,
 }) => {
   if (!open) return null;
 
@@ -131,6 +141,15 @@ export const NavigationDrawer: React.FC<{
                 onClose();
               }}
             />
+            {onOpenCloudHub && (
+              <DrawerNavBtn
+                label="Cloud Hub · Sharing, BMS & Dual-PV"
+                onClick={() => {
+                  onClose();
+                  onOpenCloudHub();
+                }}
+              />
+            )}
             <DrawerNavBtn
               label="Account Login & Device Lock"
               onClick={() => {
@@ -238,19 +257,72 @@ export const PalettePickerModal: React.FC<{
 export const TimersModal: React.FC<{
   open: boolean;
   timers: ModeTimerItem[];
+  deviceId?: string;
+  accountSession?: InverterZoneAccountSession | null;
   onAddTimer: (timer: Omit<ModeTimerItem, 'id'>) => void;
   onToggleTimer: (id: string) => void;
   onDeleteTimer: (id: string) => void;
   onClose: () => void;
-}> = ({ open, timers, onAddTimer, onToggleTimer, onDeleteTimer, onClose }) => {
+}> = ({
+  open,
+  timers,
+  deviceId,
+  accountSession = null,
+  onAddTimer,
+  onToggleTimer,
+  onDeleteTimer,
+  onClose,
+}) => {
   const [label, setLabel] = useState('Morning Solar Priority');
   const [time, setTime] = useState('07:00');
   const [targetMode, setTargetMode] = useState<'SUB' | 'SBU' | 'USB' | 'SOL'>('SUB');
   const [chargingMode, setChargingMode] = useState<'CSO' | 'SNU' | 'OSO'>('CSO');
 
+  const [cloudTimers, setCloudTimers] = useState<CloudTimerItem[]>([]);
+  const [loadingCloud, setLoadingCloud] = useState(false);
+  const [cloudNotice, setCloudNotice] = useState<string | null>(null);
+  const [settingDropdown, setSettingDropdown] = useState<string[]>([]);
+
+  const loadCloudTimers = useCallback(async () => {
+    if (!accountSession?.token || !deviceId) return;
+    setLoadingCloud(true);
+    try {
+      const [list, dropdown] = await Promise.all([
+        fetchCloudTimers(accountSession.token, deviceId),
+        readCloudEndpoint<unknown>('getTimerSettingDropdown', {}, accountSession.token).catch(
+          () => null
+        ),
+      ]);
+      setCloudTimers(list);
+      if (Array.isArray(dropdown)) {
+        setSettingDropdown(
+          dropdown
+            .map((item) =>
+              typeof item === 'string'
+                ? item
+                : item && typeof item === 'object'
+                  ? String((item as Record<string, unknown>).name ?? (item as Record<string, unknown>).label ?? '')
+                  : ''
+            )
+            .filter(Boolean)
+        );
+      }
+    } catch (err) {
+      setCloudNotice(err instanceof Error ? err.message : 'Unable to sync cloud timers');
+    } finally {
+      setLoadingCloud(false);
+    }
+  }, [accountSession?.token, deviceId]);
+
+  useEffect(() => {
+    if (open && accountSession?.token && deviceId) {
+      void loadCloudTimers();
+    }
+  }, [open, accountSession?.token, deviceId, loadCloudTimers]);
+
   if (!open) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!label.trim()) return;
     onAddTimer({
@@ -261,11 +333,57 @@ export const TimersModal: React.FC<{
       days: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
       enabled: true,
     });
+
+    if (accountSession?.token && deviceId) {
+      try {
+        const res = await sendInverterCommand(accountSession.token, 'addIimer', {
+          deviceId,
+          time,
+          setting: settingDropdown[0] || 'Output Mode',
+          value: targetMode,
+          schedule: 'Daily',
+        });
+        setCloudNotice(res.msg);
+        await loadCloudTimers();
+      } catch (err) {
+        setCloudNotice(err instanceof Error ? err.message : 'Cloud add timer failed');
+      }
+    }
+
     setLabel('');
   };
 
+  const handleCloudToggle = async (item: CloudTimerItem) => {
+    if (!accountSession?.token) return;
+    try {
+      await sendInverterCommand(accountSession.token, 'timerChange', {
+        id: item.id,
+        mapId: item.mapId ?? item.id,
+        value: item.enabled ? '0' : '1',
+      });
+      await loadCloudTimers();
+    } catch (err) {
+      setCloudNotice(err instanceof Error ? err.message : 'Cloud timer toggle failed');
+    }
+  };
+
+  const handleCloudDelete = async (item: CloudTimerItem) => {
+    if (!accountSession?.token) return;
+    try {
+      await sendInverterCommand(accountSession.token, 'removeTimer', {
+        id: item.id,
+        mapId: item.mapId ?? item.id,
+      });
+      await loadCloudTimers();
+    } catch (err) {
+      setCloudNotice(err instanceof Error ? err.message : 'Cloud timer delete failed');
+    }
+  };
+
+  const totalCount = accountSession ? cloudTimers.length + timers.length : timers.length;
+
   return (
-    <ModalShell title={`Mode Schedule Timers (${timers.length})`} onClose={onClose}>
+    <ModalShell title={`Mode Schedule Timers (${totalCount})`} onClose={onClose}>
       <form onSubmit={handleSubmit} className="space-y-3 pb-4 border-b border-slate-200 dark:border-slate-800">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
@@ -329,15 +447,70 @@ export const TimersModal: React.FC<{
 
         <button
           type="submit"
-          className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-[#FF5751] hover:bg-[#E84B45] text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors"
+          className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-[#FF5751] hover:bg-[#E84B45] text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
         >
           <Plus className="w-4 h-4" />
-          <span>Add Mode Timer</span>
+          <span>{accountSession ? 'Add & Sync Cloud Timer' : 'Add Mode Timer'}</span>
         </button>
+
+        {cloudNotice && (
+          <p className="text-xs font-mono text-emerald-600 dark:text-emerald-400">{cloudNotice}</p>
+        )}
       </form>
 
-      <div className="mt-4 space-y-2.5 max-h-60 overflow-y-auto">
-        {timers.length === 0 ? (
+      <div className="mt-4 space-y-2.5 max-h-64 overflow-y-auto">
+        {accountSession && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-semibold text-slate-700 dark:text-slate-300">
+                InverterZone Cloud Timers ({cloudTimers.length})
+              </span>
+              <button
+                type="button"
+                onClick={() => void loadCloudTimers()}
+                disabled={loadingCloud}
+                className="text-emerald-600 dark:text-emerald-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
+              >
+                <RefreshCw className={`w-3 h-3 ${loadingCloud ? 'animate-spin' : ''}`} />
+                <span>Refresh</span>
+              </button>
+            </div>
+            {cloudTimers.map((ct) => (
+              <div
+                key={ct.id}
+                className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-between gap-3"
+              >
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
+                    {ct.label || ct.setting} → {ct.value}
+                  </p>
+                  <p className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400 mt-0.5">
+                    {ct.time} · Cloud ID {ct.id}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <input
+                    type="checkbox"
+                    checked={ct.enabled}
+                    onChange={() => void handleCloudToggle(ct)}
+                    aria-label={`Enable cloud timer ${ct.id}`}
+                    className="w-5 h-5 accent-emerald-500 cursor-pointer"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleCloudDelete(ct)}
+                    aria-label={`Delete cloud timer ${ct.id}`}
+                    className="min-h-[40px] min-w-[40px] rounded-lg flex items-center justify-center text-slate-400 hover:text-red-500 cursor-pointer"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {timers.length === 0 && cloudTimers.length === 0 ? (
           <div className="py-6 text-center text-xs text-slate-500 dark:text-slate-400">
             <Clock className="w-6 h-6 mx-auto mb-1.5 opacity-60" />
             No scheduled timers configured yet. Add one above to track mode transitions.
@@ -368,7 +541,7 @@ export const TimersModal: React.FC<{
                   type="button"
                   onClick={() => onDeleteTimer(item.id)}
                   aria-label={`Delete ${item.label}`}
-                  className="min-h-[40px] min-w-[40px] rounded-lg flex items-center justify-center text-slate-400 hover:text-red-500"
+                  className="min-h-[40px] min-w-[40px] rounded-lg flex items-center justify-center text-slate-400 hover:text-red-500 cursor-pointer"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
@@ -443,6 +616,10 @@ export interface NearbyPlantInfo {
   loadW?: number;
   capacity: number;
   ratedWatts?: number;
+  battV?: number;
+  battPct?: number;
+  batteryKind?: string;
+  batteryCapacityWh?: number;
   type: 'Residential' | 'Commercial';
   status: string;
   brand?: string;
@@ -479,6 +656,7 @@ export const NearbyDevicesModal: React.FC<{
   onClose,
   onSelectDevice,
 }) => {
+  const [fleetMode, setFleetMode] = useState<'solar' | 'battery'>('solar');
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'generating' | 'commercial'>('all');
@@ -487,6 +665,9 @@ export const NearbyDevicesModal: React.FC<{
     loadSavedGeoCenter()
   );
   const [realNearbyPlants, setRealNearbyPlants] = useState<NearbyPlantInfo[]>([]);
+  const [batteryPlants, setBatteryPlants] = useState<NearbyPlantInfo[]>([]);
+  const [batteryRadiusKm, setBatteryRadiusKm] = useState<number>(25);
+  const [loadingBatteryFleet, setLoadingBatteryFleet] = useState(false);
   const [nextPage, setNextPage] = useState<number | null>(null);
   const [loadingNearby, setLoadingNearby] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -600,11 +781,59 @@ export const NearbyDevicesModal: React.FC<{
     [accountSession?.token, geoCenter.lat, geoCenter.lon, sortMode, debouncedSearch, mapNearbyItem]
   );
 
+  const loadBatteryFleet = useCallback(async () => {
+    setLoadingBatteryFleet(true);
+    setNearbyError(null);
+    try {
+      const { radiusKm, items } = await fetchNearbyBatteries({
+        lat: geoCenter.lat,
+        lng: geoCenter.lon,
+        token: accountSession?.token,
+      });
+      setBatteryRadiusKm(radiusKm);
+      const mapped: NearbyPlantInfo[] = items.map((b: NearbyBatteryPlant) => ({
+        id: b.mac,
+        name: b.name,
+        distance:
+          b.distanceKm !== null && Number.isFinite(b.distanceKm)
+            ? `${b.distanceKm.toFixed(1)} km`
+            : `< ${radiusKm} km`,
+        distanceKm: b.distanceKm ?? undefined,
+        solarW: b.solarW ?? 0,
+        loadW: b.loadW,
+        capacity: Math.max(3000, b.capacityWh ?? 5000),
+        battV: b.battV,
+        battPct: b.battPct,
+        batteryKind: b.batteryKind,
+        batteryCapacityWh: b.capacityWh,
+        type: (b.capacityWh ?? 0) >= 15000 ? 'Commercial' : 'Residential',
+        status: `${b.batteryKind || 'Battery'}${
+          b.capacityWh ? ` · ${(b.capacityWh / 1000).toFixed(1)} kWh` : ''
+        }${b.battV ? ` · ${b.battV.toFixed(1)}V` : ''}`,
+        brand: b.brand,
+        model: b.model,
+        location: b.location,
+        online: b.online,
+        liveTelemetry: null,
+      }));
+      setBatteryPlants(mapped);
+    } catch (err) {
+      setNearbyError(
+        err instanceof Error ? err.message : 'Unable to fetch nearby battery fleet.'
+      );
+    } finally {
+      setLoadingBatteryFleet(false);
+    }
+  }, [geoCenter.lat, geoCenter.lon, accountSession?.token]);
+
   useEffect(() => {
-    if (open && accountSession?.token) {
+    if (open && fleetMode === 'solar' && accountSession?.token) {
       void loadRealNearby(1, false);
     }
-  }, [open, accountSession?.token, loadRealNearby]);
+    if (open && fleetMode === 'battery') {
+      void loadBatteryFleet();
+    }
+  }, [open, fleetMode, accountSession?.token, loadRealNearby, loadBatteryFleet]);
 
   if (!open) return null;
 
@@ -643,7 +872,12 @@ export const NearbyDevicesModal: React.FC<{
     { id: 'CANAL8812V339', name: 'Canal View Villas #42', distance: '6.3 km', solarW: 4100, loadW: 1380, capacity: 6000, type: 'Residential', status: 'Sample Fleet' },
   ];
 
-  const activeList = accountSession ? realNearbyPlants : sampleList;
+  const activeList =
+    fleetMode === 'battery'
+      ? batteryPlants
+      : accountSession
+        ? realNearbyPlants
+        : sampleList;
 
   const filtered = activeList.filter((item) => {
     const q = searchTerm.toLowerCase();
@@ -658,16 +892,47 @@ export const NearbyDevicesModal: React.FC<{
     return matchSearch;
   });
 
-  const modalTitle = accountSession
-    ? `Nearby Solar Fleet (${realNearbyPlants.length} loaded${
-        accountStats?.nearByCount ? ` · ${accountStats.nearByCount.toLocaleString()} Total` : ''
-      })`
-    : `Nearby Solar Fleet (${sampleList.length} Sample Preview)`;
+  const modalTitle =
+    fleetMode === 'battery'
+      ? `Nearby Battery Fleet (${batteryPlants.length} within ${batteryRadiusKm} km)`
+      : accountSession
+        ? `Nearby Solar Fleet (${realNearbyPlants.length} loaded${
+            accountStats?.nearByCount ? ` · ${accountStats.nearByCount.toLocaleString()} Total` : ''
+          })`
+        : `Nearby Solar Fleet (${sampleList.length} Sample Preview)`;
+
+  const isBusy = fleetMode === 'battery' ? loadingBatteryFleet : loadingNearby;
 
   return (
     <ModalShell title={modalTitle} onClose={onClose} wide>
       <div className="space-y-4">
-        {!accountSession ? (
+        {/* Solar Fleet vs Battery Fleet Toggle */}
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => setFleetMode('solar')}
+            className={`min-h-[42px] px-3 rounded-xl text-xs font-semibold cursor-pointer transition-colors ${
+              fleetMode === 'solar'
+                ? 'bg-emerald-600 text-white'
+                : 'bg-slate-100 dark:bg-[#1B232D] text-slate-700 dark:text-slate-300'
+            }`}
+          >
+            All Nearby Solar Fleet
+          </button>
+          <button
+            type="button"
+            onClick={() => setFleetMode('battery')}
+            className={`min-h-[42px] px-3 rounded-xl text-xs font-semibold cursor-pointer transition-colors ${
+              fleetMode === 'battery'
+                ? 'bg-emerald-600 text-white'
+                : 'bg-slate-100 dark:bg-[#1B232D] text-slate-700 dark:text-slate-300'
+            }`}
+          >
+            Battery Fleet ({batteryRadiusKm} km)
+          </button>
+        </div>
+
+        {!accountSession && fleetMode === 'solar' ? (
           <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-start gap-3">
               <Globe className="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" />
@@ -676,7 +941,7 @@ export const NearbyDevicesModal: React.FC<{
                   Sign in with your InverterZone account for real nearby plants
                 </p>
                 <p className="mt-0.5">
-                  Showing {sampleList.length} preview items right now. Sign in with your company app login to load all real nearby inverters around you.
+                  Showing {sampleList.length} preview items right now (or switch to Battery Fleet above without login). Sign in with your company app login to load all real nearby inverters around you.
                 </p>
               </div>
             </div>
@@ -716,11 +981,15 @@ export const NearbyDevicesModal: React.FC<{
                 </button>
                 <button
                   type="button"
-                  onClick={() => void loadRealNearby(1, false)}
-                  disabled={loadingNearby}
+                  onClick={() =>
+                    fleetMode === 'battery'
+                      ? void loadBatteryFleet()
+                      : void loadRealNearby(1, false)
+                  }
+                  disabled={isBusy}
                   className="min-h-[38px] px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${loadingNearby ? 'animate-spin' : ''}`} />
+                  <RefreshCw className={`w-3.5 h-3.5 ${isBusy ? 'animate-spin' : ''}`} />
                   <span>Refresh</span>
                 </button>
               </div>
@@ -841,22 +1110,26 @@ export const NearbyDevicesModal: React.FC<{
 
         {/* Nearby Device List */}
         <div className="space-y-2.5 max-h-[50vh] overflow-y-auto pr-1">
-          {loadingNearby ? (
+          {isBusy ? (
             <div className="py-10 flex flex-col items-center justify-center gap-2 text-xs text-slate-500">
               <Loader2 className="w-5 h-5 animate-spin text-emerald-500" />
               <span>
-                {debouncedSearch
-                  ? `Searching InverterZone fleet for "${debouncedSearch}"...`
-                  : `Loading nearby inverters around ${geoCenter.label}...`}
+                {fleetMode === 'battery'
+                  ? `Loading battery installations within ${batteryRadiusKm} km of ${geoCenter.label}...`
+                  : debouncedSearch
+                    ? `Searching InverterZone fleet for "${debouncedSearch}"...`
+                    : `Loading nearby inverters around ${geoCenter.label}...`}
               </span>
             </div>
           ) : filtered.length === 0 ? (
             <div className="text-center py-8 text-xs text-slate-500">
-              {accountSession
-                ? debouncedSearch
-                  ? `No nearby InverterZone plants matched "${debouncedSearch}".`
-                  : `No nearby InverterZone installations returned for ${geoCenter.label}. Try tapping Refresh or switching city/GPS.`
-                : 'No installations found matching your filter.'}
+              {fleetMode === 'battery'
+                ? `No battery banks found within ${batteryRadiusKm} km of ${geoCenter.label}. Try another city or GPS.`
+                : accountSession
+                  ? debouncedSearch
+                    ? `No nearby InverterZone plants matched "${debouncedSearch}".`
+                    : `No nearby InverterZone installations returned for ${geoCenter.label}. Try tapping Refresh or switching city/GPS.`
+                  : 'No installations found matching your filter.'}
             </div>
           ) : (
             <>
@@ -939,7 +1212,7 @@ export const NearbyDevicesModal: React.FC<{
                 );
               })}
 
-              {accountSession && nextPage !== null && (
+              {fleetMode === 'solar' && accountSession && nextPage !== null && (
                 <div className="pt-2 flex justify-center">
                   <button
                     type="button"
